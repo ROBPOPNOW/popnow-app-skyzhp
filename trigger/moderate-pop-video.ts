@@ -6,6 +6,7 @@ import { createClient } from "@supabase/supabase-js";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { execSync } from "child_process";
 
 // Define the payload type for the task
 type ModerateVideoPayload = {
@@ -23,6 +24,22 @@ type ModerationResult = {
   deleted?: boolean;
   notificationSent?: boolean;
 };
+
+/**
+ * Check if FFmpeg is available in the system
+ * In Trigger.dev v3, FFmpeg should be available in the deployment environment
+ */
+function checkFFmpegAvailability(): boolean {
+  try {
+    execSync('ffmpeg -version', { stdio: 'pipe' });
+    console.log('✅ FFmpeg is available in the system');
+    return true;
+  } catch (error) {
+    console.error('❌ FFmpeg is not available in the system');
+    console.error('This is required for video frame extraction');
+    return false;
+  }
+}
 
 /**
  * Validate Bunny.net credentials format
@@ -237,6 +254,11 @@ async function deleteFromBunnyNet(videoUrl: string): Promise<boolean> {
  * 
  * NEW: If rejected, the video is IMMEDIATELY DELETED from Bunny.net and Supabase to save storage costs.
  * A notification is sent to the user explaining the rejection.
+ * 
+ * TRIGGER.DEV V3 NOTES:
+ * - FFmpeg extension is not available in v3 (4.3.x)
+ * - FFmpeg should be available in the deployment environment by default
+ * - If FFmpeg is not available, the task will fail with a clear error message
  */
 export const moderatePopVideo = task({
   id: "moderate-pop-video",
@@ -255,6 +277,11 @@ export const moderatePopVideo = task({
     console.log("🔗 Video URL:", payload.videoUrl);
     console.log("🖼️  Thumbnail URL:", payload.thumbnailUrl || "N/A");
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    // Check if FFmpeg is available
+    if (!checkFFmpegAvailability()) {
+      throw new Error("FFmpeg is not available in the deployment environment. This is required for video frame extraction.");
+    }
 
     // Validate Bunny.net credentials at the start
     const bunnyValidation = validateBunnyCredentials();

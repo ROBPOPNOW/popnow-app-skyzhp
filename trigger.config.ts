@@ -1,6 +1,5 @@
 
 import { defineConfig } from "@trigger.dev/sdk/v3";
-import { ffmpeg } from "@trigger.dev/build/extensions/ffmpeg";
 
 export default defineConfig({
   project: process.env.TRIGGER_PROJECT_ID || "proj_dtmdbscahfzkvinomtbw",
@@ -22,10 +21,11 @@ export default defineConfig({
   },
   
   build: {
-    extensions: [
-      // FFmpeg extension required for video processing
-      ffmpeg(),
-    ],
+    // FFmpeg extension is not available in Trigger.dev v3 (4.3.x)
+    // FFmpeg will be available in the deployment environment by default
+    // or can be installed via system packages
+    extensions: [],
+    
     // Ensure all dependencies are bundled
     external: [],
   },
