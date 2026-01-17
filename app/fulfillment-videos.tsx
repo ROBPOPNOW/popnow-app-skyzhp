@@ -41,6 +41,7 @@ export default function FulfillmentVideosScreen() {
   const viewedVideos = useRef<Set<string>>(new Set());
   const [isFocused, setIsFocused] = useState(true);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [isRequester, setIsRequester] = useState(false);
   const swipeGestureRef = useRef<PanGestureHandler>(null);
 
   useEffect(() => {
@@ -68,6 +69,21 @@ export default function FulfillmentVideosScreen() {
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
         setCurrentUserId(user.id);
+        
+        // Check if current user is the requester
+        const { data: request } = await supabase
+          .from('video_requests')
+          .select('user_id')
+          .eq('id', requestId)
+          .single();
+        
+        if (request && request.user_id === user.id) {
+          console.log('✅ Current user is the requester');
+          setIsRequester(true);
+        } else {
+          console.log('ℹ️ Current user is NOT the requester');
+          setIsRequester(false);
+        }
       }
     } catch (error) {
       console.error('Error getting current user:', error);
@@ -93,10 +109,24 @@ export default function FulfillmentVideosScreen() {
   const loadFulfillmentVideos = async () => {
     try {
       setLoading(true);
-      console.log('Loading fulfillment videos for request:', requestId);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('📹 LOADING FULFILLMENT VIDEOS');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('Request ID:', requestId);
 
       // Get current user to check liked videos and ownership
       const { data: { user } } = await supabase.auth.getUser();
+      console.log('Current user ID:', user?.id);
+
+      // Check if current user is the requester
+      const { data: request } = await supabase
+        .from('video_requests')
+        .select('user_id')
+        .eq('id', requestId)
+        .single();
+      
+      const isUserRequester = request && user && request.user_id === user.id;
+      console.log('Is user the requester?', isUserRequester);
 
       // Fetch fulfillment videos for this request
       const { data: fulfillments, error: fulfillmentsError } = await supabase
@@ -120,15 +150,31 @@ export default function FulfillmentVideosScreen() {
       const videoIds = fulfillments.map(f => f.video_id);
       console.log('Found fulfillment video IDs:', videoIds);
 
-      // Calculate the timestamp for 1 hour ago
-      const oneHourAgo = new Date();
-      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
-      const oneHourAgoISO = oneHourAgo.toISOString();
+      // 🚨 CRITICAL FIX: Different time filters based on viewer role
+      let timeFilter: string;
+      
+      if (isUserRequester) {
+        // REQUESTER: Show videos up to 3 days old
+        const threeDaysAgo = new Date();
+        threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+        timeFilter = threeDaysAgo.toISOString();
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('👤 REQUESTER VIEW: Showing videos up to 3 days old');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('Cutoff date:', timeFilter);
+      } else {
+        // PUBLIC: Show videos up to 1 hour old
+        const oneHourAgo = new Date();
+        oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+        timeFilter = oneHourAgo.toISOString();
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('🌍 PUBLIC VIEW: Showing videos up to 1 hour old');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('Cutoff date:', timeFilter);
+      }
 
-      console.log('Loading videos created after:', oneHourAgoISO);
-
-      // Fetch video details
-      // For fulfillment videos, show videos within last hour OR videos owned by current user
+      // Fetch video details with appropriate time filter
+      // For fulfillment videos, show videos within the time limit OR videos owned by current user
       const { data: videosData, error: videosError } = await supabase
         .from('videos')
         .select(`
@@ -142,7 +188,7 @@ export default function FulfillmentVideosScreen() {
         `)
         .in('id', videoIds)
         .eq('moderation_status', 'approved')
-        .or(`created_at.gte.${oneHourAgoISO},user_id.eq.${user?.id || 'none'}`);
+        .or(`created_at.gte.${timeFilter},user_id.eq.${user?.id || 'none'}`);
 
       if (videosError) {
         console.error('Error loading videos:', videosError);
@@ -151,10 +197,12 @@ export default function FulfillmentVideosScreen() {
       }
 
       if (!videosData || videosData.length === 0) {
-        console.log('No approved videos found');
+        console.log('No approved videos found within time range');
         setVideos([]);
         return;
       }
+
+      console.log(`✅ Found ${videosData.length} videos within time range`);
 
       // Get liked videos for current user
       let likedVideoIds: string[] = [];
@@ -198,7 +246,8 @@ export default function FulfillmentVideosScreen() {
       }));
 
       setVideos(transformedVideos);
-      console.log(`Loaded ${transformedVideos.length} fulfillment videos`);
+      console.log(`✅ Loaded ${transformedVideos.length} fulfillment videos`);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       
       // If initialVideoId is provided, scroll to that video
       if (initialVideoId) {
@@ -472,16 +521,18 @@ export default function FulfillmentVideosScreen() {
           onViewChange={handleViewChange}
           userLocation={userLocation}
         />
-        {/* Download button overlay */}
-        <View style={styles.downloadButtonContainer}>
-          <Pressable
-            style={styles.downloadButton}
-            onPress={() => handleDownloadVideo(item.video_url, item.id)}
-          >
-            <IconSymbol name="arrow.down.circle.fill" size={32} color="#FFFFFF" />
-            <Text style={styles.downloadButtonText}>Download</Text>
-          </Pressable>
-        </View>
+        {/* Download button overlay - only show for requester */}
+        {isRequester && (
+          <View style={styles.downloadButtonContainer}>
+            <Pressable
+              style={styles.downloadButton}
+              onPress={() => handleDownloadVideo(item.video_url, item.id)}
+            >
+              <IconSymbol ios_icon_name="arrow.down.circle.fill" android_material_icon_name="download" size={32} color="#FFFFFF" />
+              <Text style={styles.downloadButtonText}>Download</Text>
+            </Pressable>
+          </View>
+        )}
       </View>
     );
   };
@@ -524,7 +575,9 @@ export default function FulfillmentVideosScreen() {
         <View style={styles.emptyContainer}>
           <Text style={styles.emptyText}>No fulfillment videos</Text>
           <Text style={styles.emptySubtext}>
-            No videos have been posted to fulfill this request yet.
+            {isRequester 
+              ? 'No videos have been posted to fulfill this request yet, or they have expired (3 days).'
+              : 'No videos have been posted to fulfill this request yet, or they have expired (1 hour).'}
           </Text>
           <Text style={styles.emptySubtext}>Swipe right to go back</Text>
         </View>
@@ -581,6 +634,14 @@ export default function FulfillmentVideosScreen() {
               {activeIndex + 1} / {videos.length}
             </Text>
           </View>
+          
+          {/* Requester Badge */}
+          {isRequester && (
+            <View style={styles.requesterBadge}>
+              <IconSymbol ios_icon_name="checkmark.seal.fill" android_material_icon_name="verified" size={16} color="#FFFFFF" />
+              <Text style={styles.requesterBadgeText}>Your Request</Text>
+            </View>
+          )}
         </SafeAreaView>
       </PanGestureHandler>
     </GestureHandlerRootView>
@@ -633,6 +694,24 @@ const styles = StyleSheet.create({
   videoCounterText: {
     color: 'white',
     fontSize: 14,
+    fontWeight: '600',
+  },
+  requesterBadge: {
+    position: 'absolute',
+    top: 60,
+    left: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: colors.primary,
+    zIndex: 100,
+  },
+  requesterBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 12,
     fontWeight: '600',
   },
   downloadButtonContainer: {

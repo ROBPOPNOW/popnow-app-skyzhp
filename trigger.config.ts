@@ -6,6 +6,10 @@ export default defineConfig({
   runtime: "node",
   logLevel: "log",
   
+  // CRITICAL: maxDuration is now required (minimum 5 seconds)
+  // For video moderation (extracting frames, AWS checks), set to 5 minutes
+  maxDuration: 300, // 300 seconds = 5 minutes
+  
   // CRITICAL: Explicitly define the trigger directory
   dirs: ["./trigger"],
   

@@ -53,6 +53,11 @@ export default function UploadScreen() {
   const uploadStartedRef = useRef(false);
   const videoUriRef = useRef<string | null>(null); // Track which video is being uploaded
   const lastUploadAttemptRef = useRef<number>(0); // Debouncing timestamp
+  
+  // 🚨 NEW: AbortController for canceling uploads
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const currentBunnyVideoIdRef = useRef<string | null>(null);
+  const currentPendingUploadIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     initializeScreen();
@@ -380,11 +385,15 @@ export default function UploadScreen() {
       uploadInProgressRef.current = true;
       setIsUploading(true);
       
+      // 🚨 NEW: Create AbortController for this upload
+      abortControllerRef.current = new AbortController();
+      
       console.log('✅ Upload flags set:');
       console.log('  - uploadStartedRef.current:', uploadStartedRef.current);
       console.log('  - uploadInProgressRef.current:', uploadInProgressRef.current);
       console.log('  - isUploading state:', true);
       console.log('  - Button is now DISABLED');
+      console.log('  - AbortController created');
       
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('📝 Creating pending upload record in database...');
@@ -419,11 +428,15 @@ export default function UploadScreen() {
         uploadStartedRef.current = false;
         uploadInProgressRef.current = false;
         setIsUploading(false);
+        abortControllerRef.current = null;
         return;
       }
 
       console.log('✅ Pending upload created successfully');
       console.log('Pending Upload ID:', pendingUpload.id);
+      
+      // Store pending upload ID for cancellation
+      currentPendingUploadIdRef.current = pendingUpload.id;
 
       // 📱 IMMEDIATELY navigate to profile pending tab (BEFORE starting upload)
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -457,6 +470,8 @@ export default function UploadScreen() {
       uploadStartedRef.current = false;
       uploadInProgressRef.current = false;
       setIsUploading(false);
+      abortControllerRef.current = null;
+      currentPendingUploadIdRef.current = null;
     }
   };
 
@@ -478,6 +493,12 @@ export default function UploadScreen() {
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('Pending Upload ID:', pendingUploadId);
 
+      // Check if upload was aborted
+      if (abortControllerRef.current?.signal.aborted) {
+        console.log('⚠️ Upload aborted before starting');
+        return;
+      }
+
       // Update progress: 10% - Creating video on Bunny.net
       console.log('📊 Progress: 10% - Creating video on Bunny.net');
       await supabase
@@ -489,7 +510,18 @@ export default function UploadScreen() {
       console.log('🎬 Creating video on Bunny.net Stream...');
       const videoData = await createStreamVideo(caption);
       bunnyVideoId = videoData.guid;
+      currentBunnyVideoIdRef.current = bunnyVideoId;
       console.log('✅ Video created with ID:', bunnyVideoId);
+
+      // Check if upload was aborted after creating video
+      if (abortControllerRef.current?.signal.aborted) {
+        console.log('⚠️ Upload aborted after creating video, deleting from Bunny.net...');
+        if (bunnyVideoId) {
+          await deleteStreamVideo(bunnyVideoId);
+          console.log('✅ Video deleted from Bunny.net');
+        }
+        return;
+      }
 
       // Update progress: 20% - Uploading video file
       console.log('📊 Progress: 20% - Uploading video file');
@@ -502,6 +534,16 @@ export default function UploadScreen() {
       console.log('📤 Uploading video file to Bunny.net...');
       await uploadToStream(bunnyVideoId, videoUri);
       console.log('✅ Video uploaded to stream');
+
+      // Check if upload was aborted after uploading
+      if (abortControllerRef.current?.signal.aborted) {
+        console.log('⚠️ Upload aborted after uploading, deleting from Bunny.net...');
+        if (bunnyVideoId) {
+          await deleteStreamVideo(bunnyVideoId);
+          console.log('✅ Video deleted from Bunny.net');
+        }
+        return;
+      }
 
       // Update progress: 60% - Processing video
       console.log('📊 Progress: 60% - Processing video');
@@ -517,6 +559,16 @@ export default function UploadScreen() {
       const maxAttempts = 30;
 
       while (!processed && attempts < maxAttempts) {
+        // Check if upload was aborted during processing
+        if (abortControllerRef.current?.signal.aborted) {
+          console.log('⚠️ Upload aborted during processing, deleting from Bunny.net...');
+          if (bunnyVideoId) {
+            await deleteStreamVideo(bunnyVideoId);
+            console.log('✅ Video deleted from Bunny.net');
+          }
+          return;
+        }
+
         await new Promise(resolve => setTimeout(resolve, 2000));
         const status = await getVideoStatus(bunnyVideoId);
         console.log(`Video status check ${attempts + 1}/${maxAttempts}:`, status);
@@ -540,6 +592,16 @@ export default function UploadScreen() {
       }
 
       console.log('✅ Video processed successfully');
+
+      // Final check before saving to database
+      if (abortControllerRef.current?.signal.aborted) {
+        console.log('⚠️ Upload aborted before saving to database, deleting from Bunny.net...');
+        if (bunnyVideoId) {
+          await deleteStreamVideo(bunnyVideoId);
+          console.log('✅ Video deleted from Bunny.net');
+        }
+        return;
+      }
 
       // Update progress: 95% - Saving to database
       console.log('📊 Progress: 95% - Saving to database');
@@ -658,6 +720,17 @@ export default function UploadScreen() {
       console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.error('Error:', error);
       
+      // If upload failed, delete video from Bunny.net if it was created
+      if (bunnyVideoId) {
+        console.log('🗑️ Cleaning up failed upload from Bunny.net...');
+        try {
+          await deleteStreamVideo(bunnyVideoId);
+          console.log('✅ Failed video deleted from Bunny.net');
+        } catch (deleteError) {
+          console.error('❌ Error deleting failed video:', deleteError);
+        }
+      }
+      
       await supabase
         .from('pending_uploads')
         .update({ 
@@ -669,32 +742,91 @@ export default function UploadScreen() {
       // Reset upload flags after completion or error
       console.log('🔓 Resetting upload flags...');
       uploadInProgressRef.current = false;
+      abortControllerRef.current = null;
+      currentBunnyVideoIdRef.current = null;
+      currentPendingUploadIdRef.current = null;
       // Note: We don't reset uploadStartedRef because the user has already navigated away
       // This prevents them from uploading the same video again if they come back to this screen
     }
   };
 
   const handleCancelUpload = () => {
-    if (isUploading) {
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🚫 USER TAPPED CANCEL UPLOAD');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('isUploading:', isUploading);
+    console.log('uploadInProgressRef.current:', uploadInProgressRef.current);
+    
+    if (isUploading || uploadInProgressRef.current) {
       Alert.alert(
-        'Upload in Progress',
-        'Your video is being uploaded. Are you sure you want to cancel?',
+        'Cancel Upload',
+        'Are you sure you want to cancel this upload? The video will be deleted.',
         [
           { text: 'Continue Upload', style: 'cancel' },
           {
             text: 'Cancel Upload',
             style: 'destructive',
-            onPress: () => {
-              console.log('User cancelled upload');
+            onPress: async () => {
+              console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+              console.log('🗑️ CANCELING UPLOAD');
+              console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+              
+              // 1. Abort the upload request
+              if (abortControllerRef.current) {
+                console.log('⚠️ Aborting upload request...');
+                abortControllerRef.current.abort();
+                console.log('✅ Upload request aborted');
+              }
+              
+              // 2. Delete video from Bunny.net if it was created
+              if (currentBunnyVideoIdRef.current) {
+                console.log('🗑️ Deleting video from Bunny.net...');
+                console.log('Video ID:', currentBunnyVideoIdRef.current);
+                try {
+                  await deleteStreamVideo(currentBunnyVideoIdRef.current);
+                  console.log('✅ Video deleted from Bunny.net');
+                } catch (error) {
+                  console.error('❌ Error deleting video from Bunny.net:', error);
+                }
+              }
+              
+              // 3. Delete pending upload record from database
+              if (currentPendingUploadIdRef.current) {
+                console.log('🗑️ Deleting pending upload record from database...');
+                console.log('Pending Upload ID:', currentPendingUploadIdRef.current);
+                try {
+                  await supabase
+                    .from('pending_uploads')
+                    .delete()
+                    .eq('id', currentPendingUploadIdRef.current);
+                  console.log('✅ Pending upload record deleted');
+                } catch (error) {
+                  console.error('❌ Error deleting pending upload record:', error);
+                }
+              }
+              
+              // 4. Reset all flags
+              console.log('🔓 Resetting all upload flags...');
               uploadStartedRef.current = false;
               uploadInProgressRef.current = false;
               setIsUploading(false);
+              abortControllerRef.current = null;
+              currentBunnyVideoIdRef.current = null;
+              currentPendingUploadIdRef.current = null;
+              console.log('✅ All flags reset');
+              
+              console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+              console.log('✅ UPLOAD CANCELED SUCCESSFULLY');
+              console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+              
+              // 5. Navigate back
               router.back();
             },
           },
         ]
       );
     } else {
+      console.log('No upload in progress, navigating back');
       router.back();
     }
   };
