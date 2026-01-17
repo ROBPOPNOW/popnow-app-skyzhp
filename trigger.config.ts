@@ -3,9 +3,13 @@ import { defineConfig } from "@trigger.dev/sdk/v3";
 import { ffmpeg } from "@trigger.dev/build/extensions/ffmpeg";
 
 export default defineConfig({
-  project: process.env.TRIGGER_PROJECT_ID || "proj_dtmdbscahfzkvinomtbw", // Replace with your Trigger.dev project ID
+  project: process.env.TRIGGER_PROJECT_ID || "proj_dtmdbscahfzkvinomtbw",
   runtime: "node",
   logLevel: "log",
+  
+  // CRITICAL: Explicitly define the trigger directory
+  dirs: ["./trigger"],
+  
   retries: {
     enabledInDev: true,
     default: {
@@ -16,10 +20,13 @@ export default defineConfig({
       randomize: true,
     },
   },
+  
   build: {
     extensions: [
-      // CRITICAL: FFmpeg extension required for video processing
+      // FFmpeg extension required for video processing
       ffmpeg(),
     ],
+    // Ensure all dependencies are bundled
+    external: [],
   },
 });
