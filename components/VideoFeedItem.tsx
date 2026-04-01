@@ -73,16 +73,16 @@ const getUser = (users: any) => {
 
 // Track view IMMEDIATELY when video becomes active - no duration check
 useEffect(() => {
+  let mounted = true;
   if (!isActive || !video.id) return;
 
   console.log('Video became active:', video.id);
   
   const trackView = async () => {
     try {
+      if (!mounted) return;
       console.log('Tracking view for video:', video.id);
-      
-      // Let the parent handle database tracking via onViewChange
-      if (onViewChange) {
+      if (onViewChange && mounted) {
         onViewChange(video.id);
       }
     } catch (error) {
@@ -90,14 +90,13 @@ useEffect(() => {
     }
   };
 
-  // Track immediately when video becomes active
   trackView();
 
-  // Cleanup function - nothing needed since we track instantly
   return () => {
+    mounted = false;
     console.log('Video becoming inactive:', video.id);
   };
-}, [isActive, video.id]); // Re-run whenever isActive changes
+}, [isActive, video.id]);
 
 // Set up real-time subscription for new comments using postgres_changes
 useEffect(() => {
