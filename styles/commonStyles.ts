@@ -2,14 +2,17 @@
 import { StyleSheet, ViewStyle, TextStyle } from 'react-native';
 
 export const colors = {
-  background: '#F7F7F7',
-  text: '#212121',
-  textSecondary: '#757575',
-  primary: '#FF69B4',
-  secondary: '#7952B3',
-  accent: '#00FFFF',
-  card: '#FFFFFF',
-  highlight: '#FFFF00',
+  background: '#000000',      // Black background
+  text: '#FFFFFF',            // White text
+  textSecondary: '#B0B0B0',   // Light gray for secondary text
+  primary: '#FF69B4',         // Keep pink
+  secondary: '#7952B3',       // Keep purple
+  accent: '#00FFFF',          // Keep cyan
+  card: '#1C1C1E',            // Dark gray cards (not pure black for contrast)
+  surface: '#1C1C1E',         // Dark gray surfaces
+  highlight: '#FFFF00',       // Keep yellow
+  border: '#3A3A3C',          // Dark gray borders
+  inputBackground: '#2C2C2E', // Slightly lighter gray for inputs
 };
 
 export const buttonStyles = StyleSheet.create({

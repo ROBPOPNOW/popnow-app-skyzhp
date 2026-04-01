@@ -1,5 +1,4 @@
-
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,6 +10,7 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -19,12 +19,14 @@ import { supabase } from '@/lib/supabase';
 import { colors } from '@/styles/commonStyles';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as Location from 'expo-location';
+import { checkUploadLimit } from '@/services/premiumLimitsService';
 import { 
   createStreamVideo, 
   uploadToStream, 
   getVideoStatus, 
   deleteStreamVideo,
 } from '@/utils/bunnynet';
+import Constants from 'expo-constants';
 
 type LocationPrivacy = 'exact' | '3km' | '10km';
 
@@ -33,6 +35,7 @@ export default function UploadScreen() {
   const requestId = params.requestId as string | undefined;
   const requestDescription = params.requestDescription as string | undefined;
   const videoUri = params.videoUri as string | undefined;
+  const [isPremium, setIsPremium] = useState(false);
 
   const [description, setDescription] = useState('');
   const [hashtags, setHashtags] = useState<string[]>([]);
@@ -46,6 +49,7 @@ export default function UploadScreen() {
   const [isGeneratingDescription, setIsGeneratingDescription] = useState(false);
   const [isRefreshingLocation, setIsRefreshingLocation] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [locationDenied, setLocationDenied] = useState(false);
   
   // 🚨 CRITICAL: Upload state management to prevent double uploads
   const [isUploading, setIsUploading] = useState(false);
@@ -53,11 +57,6 @@ export default function UploadScreen() {
   const uploadStartedRef = useRef(false);
   const videoUriRef = useRef<string | null>(null); // Track which video is being uploaded
   const lastUploadAttemptRef = useRef<number>(0); // Debouncing timestamp
-  
-  // 🚨 NEW: AbortController for canceling uploads
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const currentBunnyVideoIdRef = useRef<string | null>(null);
-  const currentPendingUploadIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     initializeScreen();
@@ -75,6 +74,28 @@ export default function UploadScreen() {
 
     // Store the video URI for duplicate detection
     videoUriRef.current = videoUri;
+
+    // 📍 CHECK LOCATION PERMISSION FIRST
+    const { status } = await Location.getForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      console.log('❌ Location permission not granted');
+      setLocationDenied(true);
+      setIsLoading(false);
+      return;
+    }
+
+    // 🆕 Check premium status
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      const { data: userData } = await supabase
+        .from('users')
+        .select('is_premium')
+        .eq('id', user.id)
+        .single();
+      
+      setIsPremium(userData?.is_premium || false);
+      console.log('👑 Premium status:', userData?.is_premium || false);
+    }
 
     // Start location fetch
     getCurrentLocation().catch(err => console.log('Location fetch error (non-critical):', err));
@@ -104,7 +125,7 @@ export default function UploadScreen() {
       });
 
       if (address && address.length > 0) {
-        const addr = address[0];
+        const addr = address[0] as any;
         
         const locationParts = [];
         
@@ -164,7 +185,7 @@ export default function UploadScreen() {
       });
 
       if (address && address.length > 0) {
-        const addr = address[0];
+        const addr = address[0] as any;
         
         const locationParts = [];
         
@@ -302,178 +323,259 @@ export default function UploadScreen() {
     }
   };
 
-  const handleUpload = async () => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🎬 USER TAPPED UPLOAD VIDEO BUTTON');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    
-    // 🚨 CRITICAL: Prevent double uploads - Check ALL upload flags
-    console.log('🔍 Checking upload state...');
-    console.log('  - uploadStartedRef.current:', uploadStartedRef.current);
-    console.log('  - uploadInProgressRef.current:', uploadInProgressRef.current);
-    console.log('  - isUploading state:', isUploading);
-    console.log('  - videoUriRef.current:', videoUriRef.current);
-    console.log('  - current videoUri:', videoUri);
-    
-    // Check if upload already started
-    if (uploadStartedRef.current || uploadInProgressRef.current || isUploading) {
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('⚠️ DUPLICATE UPLOAD ATTEMPT BLOCKED');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('Upload already in progress. Ignoring duplicate tap.');
-      return;
-    }
+const handleUpload = async () => {
+  console.log('🎬 User tapped Upload Video button');
+  
+  // 🚨 CHECK: If exact location is selected, show confirmation popup FIRST
+  if (locationPrivacy === 'exact') {
+    console.log('⚠️ Exact location selected - showing confirmation popup');
+    Alert.alert(
+      'Confirm Exact Location?',
+      "You've chosen to share your exact location.\n\n✅ Great for: Public places, businesses & events, landmarks\n⚠️ Not recommended for: Home, private locations\n\nAre you sure you want to reveal the exact spot?",
+      [
+        {
+          text: 'Show Exact',
+          onPress: () => {
+            console.log('✅ User confirmed exact location - proceeding with upload');
+            // User confirmed - proceed with upload
+            proceedWithUpload();
+          },
+        },
+        {
+          text: 'Randomised ping in 3km radius',
+          onPress: () => {
+            console.log('✅ User changed to 3km radius');
+            setLocationPrivacy('3km');
+            // Don't upload - user needs to tap Upload button again
+          },
+        },
+        {
+          text: 'Randomised ping in 10km radius',
+          onPress: () => {
+            console.log('✅ User changed to 10km radius');
+            setLocationPrivacy('10km');
+            // Don't upload - user needs to tap Upload button again
+          },
+          style: 'cancel',
+        },
+      ],
+      { cancelable: false }
+    );
+    return; // Stop here - don't proceed with upload yet
+  }
 
-    // Debouncing: Prevent multiple taps within 2 seconds
-    const now = Date.now();
-    const timeSinceLastAttempt = now - lastUploadAttemptRef.current;
-    if (timeSinceLastAttempt < 2000) {
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('⚠️ RAPID TAP DETECTED - DEBOUNCING');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log(`Time since last attempt: ${timeSinceLastAttempt}ms (minimum: 2000ms)`);
-      return;
-    }
-    lastUploadAttemptRef.current = now;
+  // If not exact location, proceed directly with upload
+  console.log('✅ Non-exact location selected - proceeding with upload');
+  proceedWithUpload();
+};
 
-    // Additional check: Prevent uploading the same video file twice
-    if (videoUriRef.current === videoUri && uploadStartedRef.current) {
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('⚠️ DUPLICATE VIDEO UPLOAD BLOCKED');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('This video file is already being uploaded.');
+const proceedWithUpload = async () => {
+  console.log('🚀 proceedWithUpload called');
+  
+  // 🚨 CRITICAL: Immediate state update to disable button
+  setIsUploading(true);
+  
+  // 🚨 CRITICAL: Prevent double uploads - check all flags FIRST
+  if (uploadStartedRef.current || uploadInProgressRef.current) {
+    console.log('⚠️ Upload already in progress, ignoring duplicate tap');
+    return;
+  }
+
+  // Debouncing: Prevent multiple taps within 2 seconds
+  const now = Date.now();
+  const timeSinceLastAttempt = now - lastUploadAttemptRef.current;
+  if (timeSinceLastAttempt < 2000) {
+    console.log('⚠️ Rapid tap detected, debouncing');
+    setIsUploading(false);
+    return;
+  }
+  lastUploadAttemptRef.current = now;
+
+  // Prevent uploading the same video file twice
+  if (videoUriRef.current === videoUri && uploadStartedRef.current) {
+    console.log('⚠️ This video is already being uploaded');
+    setIsUploading(false);
+    return;
+  }
+
+  try {
+    // 🆕 GET USER FIRST (needed for all checks)
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      Alert.alert('Error', 'You must be logged in to upload');
+      setIsUploading(false);
       return;
     }
 
     // Validation
     if (!videoUri) {
       Alert.alert('Error', 'Please record a video first');
+      setIsUploading(false);
       return;
     }
 
     if (!description.trim()) {
       Alert.alert('Error', 'Please add a description');
+      setIsUploading(false);
       return;
     }
 
     if (!location) {
-      Alert.alert('Error', 'Location is required');
+      Alert.alert(
+        'Location Required',
+        'Your location is still loading. Would you like to refresh it now?',
+        [
+          {
+            text: 'Cancel',
+            style: 'cancel',
+            onPress: () => {
+              setIsUploading(false);
+            }
+          },
+          {
+            text: 'Refresh Location',
+            onPress: async () => {
+              setIsUploading(false);
+              // Auto-trigger location refresh
+              await refreshLocation(true);
+            }
+          }
+        ]
+      );
       return;
     }
 
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        Alert.alert('Error', 'You must be logged in to upload');
-        return;
-      }
+    // 🆕 CHECK UPLOAD LIMIT (5/hour for free users)
+    console.log('🔍 Checking upload limit...');
+    const uploadLimitCheck = await checkUploadLimit(user.id);
 
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('🚀 STARTING UPLOAD PROCESS');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('User ID:', user.id);
-      console.log('Video URI:', videoUri);
-      console.log('Caption:', description);
-      console.log('Tags:', hashtags);
-      console.log('Location:', location.name);
-      
-      // 🔒 IMMEDIATELY set ALL upload flags to prevent double uploads
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('🔒 LOCKING UPLOAD - Setting all flags to prevent duplicates');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      uploadStartedRef.current = true;
-      uploadInProgressRef.current = true;
-      setIsUploading(true);
-      
-      // 🚨 NEW: Create AbortController for this upload
-      abortControllerRef.current = new AbortController();
-      
-      console.log('✅ Upload flags set:');
-      console.log('  - uploadStartedRef.current:', uploadStartedRef.current);
-      console.log('  - uploadInProgressRef.current:', uploadInProgressRef.current);
-      console.log('  - isUploading state:', true);
-      console.log('  - Button is now DISABLED');
-      console.log('  - AbortController created');
-      
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('📝 Creating pending upload record in database...');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      
-      // Create pending upload record
-      const { data: pendingUpload, error: pendingError } = await supabase
-        .from('pending_uploads')
-        .insert({
-          user_id: user.id,
-          video_uri: videoUri,
-          caption: description,
-          tags: hashtags,
-          location_latitude: location.latitude,
-          location_longitude: location.longitude,
-          location_name: location.name,
-          location_privacy: locationPrivacy,
-          request_id: requestId || null,
-          upload_progress: 0,
-          status: 'uploading',
-        })
-        .select()
-        .single();
-
-      if (pendingError) {
-        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.error('❌ ERROR CREATING PENDING UPLOAD');
-        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.error('Error:', pendingError);
-        Alert.alert('Error', 'Failed to start upload');
-        // Reset flags on error
-        uploadStartedRef.current = false;
-        uploadInProgressRef.current = false;
-        setIsUploading(false);
-        abortControllerRef.current = null;
-        return;
-      }
-
-      console.log('✅ Pending upload created successfully');
-      console.log('Pending Upload ID:', pendingUpload.id);
-      
-      // Store pending upload ID for cancellation
-      currentPendingUploadIdRef.current = pendingUpload.id;
-
-      // 📱 IMMEDIATELY navigate to profile pending tab (BEFORE starting upload)
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('📱 NAVIGATING TO PROFILE PENDING TAB');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('User will see "Uploading..." status immediately');
-      router.replace('/(tabs)/profile?tab=pending');
-
-      // 🔄 Start background upload (non-blocking) - this happens AFTER navigation
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('🔄 STARTING BACKGROUND UPLOAD PROCESS');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      uploadVideoInBackground(
-        pendingUpload.id,
-        user.id,
-        videoUri,
-        description,
-        hashtags,
-        location,
-        locationPrivacy,
-        requestId
+    if (!uploadLimitCheck.allowed) {
+      console.log('❌ Upload limit reached:', uploadLimitCheck.currentCount);
+      Alert.alert(
+        'Upload Limit Reached',
+        uploadLimitCheck.message,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Upgrade to Premium',
+            onPress: () => router.push('/settings')
+          }
+        ]
       );
+      setIsUploading(false);
+      return;
+    }
+
+    console.log('✅ Upload limit OK, proceeding...');
+
+    // 🚨 CRITICAL: Validate environment variables BEFORE attempting upload
+    console.log('🔍 Validating Bunny.net credentials...');
+    const bunnyApiKey = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_API_KEY;
+    
+    if (!bunnyApiKey) {
+      console.error('❌ EXPO_PUBLIC_BUNNY_STREAM_API_KEY is not set');
+      Alert.alert(
+        'Configuration Error',
+        'Bunny.net API key is missing.\n\nPlease check your .env file and ensure EXPO_PUBLIC_BUNNY_STREAM_API_KEY is set correctly.',
+        [{ text: 'OK' }]
+      );
+      setIsUploading(false);
+      return;
+    }
+
+    if (bunnyApiKey.length < 20) {
+      console.error('❌ EXPO_PUBLIC_BUNNY_STREAM_API_KEY appears invalid (too short)');
+      Alert.alert(
+        'Configuration Error',
+        'Bunny.net API key appears invalid.\n\nPlease verify EXPO_PUBLIC_BUNNY_STREAM_API_KEY in your .env file.',
+        [{ text: 'OK' }]
+      );
+      setIsUploading(false);
+      return;
+    }
+
+    console.log('✅ Credentials validated');
+    console.log('  - Library ID: 517995 (hardcoded)');
+    console.log('  - API Key: Present (length:', bunnyApiKey.length, ')');
+
+    console.log('🚀 Starting upload process');
+    console.log('  - User ID:', user.id);
+    console.log('  - Caption:', description);
+    console.log('  - Location:', location.name);
+    
+    // 🔒 Set upload flags to prevent double uploads
+    console.log('🔒 Locking upload to prevent duplicates');
+    uploadStartedRef.current = true;
+    uploadInProgressRef.current = true;
       
-    } catch (error: any) {
-      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.error('❌ UPLOAD ERROR');
-      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.error('Error:', error);
-      Alert.alert('Error', 'Failed to start upload: ' + (error.message || 'Unknown error'));
+    console.log('📝 Creating pending upload record...');
+
+    // Create pending upload record FIRST (before navigation)
+    const { data: pendingUpload, error: pendingError } = await supabase
+      .from('pending_uploads')
+      .insert({
+        user_id: user.id,
+        video_uri: videoUri,
+        caption: description,
+        tags: hashtags,
+        location_latitude: location.latitude,
+        location_longitude: location.longitude,
+        location_name: location.name,
+        location_privacy: locationPrivacy,
+        request_id: requestId || null,
+        upload_progress: 0,
+        status: 'uploading',
+      })
+      .select()
+      .single();
+
+    if (pendingError) {
+      console.error('❌ Error creating pending upload:', pendingError);
+      Alert.alert('Error', 'Failed to start upload. Please try again.');
       // Reset flags on error
       uploadStartedRef.current = false;
       uploadInProgressRef.current = false;
       setIsUploading(false);
-      abortControllerRef.current = null;
-      currentPendingUploadIdRef.current = null;
+      return;
     }
-  };
+
+    console.log('✅ Pending upload created:', pendingUpload.id);
+
+    // NOW navigate to Pending tab (after record exists)
+    console.log('📱 Navigating to profile pending tab...');
+    router.replace('/(tabs)/profile?tab=pending&refresh=true');
+
+    // Small delay to ensure navigation completes
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    console.log('✅ Pending upload created:', pendingUpload.id);
+
+    // Start background upload
+    console.log('🔄 Starting background upload');
+    uploadVideoInBackground( 
+      pendingUpload.id,
+      user.id,
+      videoUri,
+      description,
+      hashtags,
+      location,
+      locationPrivacy,
+      requestId
+    );
+      
+  } catch (error: any) {
+    console.error('❌ Upload error:', error);
+    Alert.alert(
+      'Upload Failed',
+      error.message || 'An unknown error occurred. Please try again.',
+      [{ text: 'OK' }]
+    );
+    // Reset flags on error
+    uploadStartedRef.current = false;
+    uploadInProgressRef.current = false;
+    setIsUploading(false);
+  }
+};
 
   const uploadVideoInBackground = async (
     pendingUploadId: string,
@@ -486,18 +588,11 @@ export default function UploadScreen() {
     reqId?: string
   ) => {
     let bunnyVideoId: string | null = null;
+    let videoRecordId: string | null = null;
     
     try {
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('🎬 BACKGROUND UPLOAD STARTED');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('Pending Upload ID:', pendingUploadId);
-
-      // Check if upload was aborted
-      if (abortControllerRef.current?.signal.aborted) {
-        console.log('⚠️ Upload aborted before starting');
-        return;
-      }
+      console.log('🎬 Background upload started');
+      console.log('  - Pending Upload ID:', pendingUploadId);
 
       // Update progress: 10% - Creating video on Bunny.net
       console.log('📊 Progress: 10% - Creating video on Bunny.net');
@@ -506,21 +601,45 @@ export default function UploadScreen() {
         .update({ upload_progress: 10 })
         .eq('id', pendingUploadId);
 
-      // Create video on Bunny.net Stream
-      console.log('🎬 Creating video on Bunny.net Stream...');
-      const videoData = await createStreamVideo(caption);
-      bunnyVideoId = videoData.guid;
-      currentBunnyVideoIdRef.current = bunnyVideoId;
-      console.log('✅ Video created with ID:', bunnyVideoId);
+      // 🚨 CRITICAL: Create video on Bunny.net Stream
+      console.log('🎬 Creating video on Bunny.net...');
 
-      // Check if upload was aborted after creating video
-      if (abortControllerRef.current?.signal.aborted) {
-        console.log('⚠️ Upload aborted after creating video, deleting from Bunny.net...');
-        if (bunnyVideoId) {
-          await deleteStreamVideo(bunnyVideoId);
-          console.log('✅ Video deleted from Bunny.net');
+      // Get user's premium status
+      const { data: userData } = await supabase
+        .from('users')
+        .select('is_premium')
+        .eq('id', userId)
+        .single();
+
+      const isPremium = userData?.is_premium || false;
+      console.log('👑 User premium status:', isPremium);
+
+      try {
+        const videoData = await createStreamVideo(caption, isPremium);
+        bunnyVideoId = videoData.guid;
+        console.log('✅ Video created with ID:', bunnyVideoId);
+        console.log('  Watermark:', isPremium ? 'DISABLED (Premium)' : 'ENABLED (Free)');
+
+        // 🚨 CRITICAL: Store Bunny video ID in pending_uploads so cancel can find it
+        console.log('💾 Storing Bunny video ID in pending upload record...');
+        console.log('   Pending Upload ID:', pendingUploadId);
+        console.log('   Bunny Video ID:', bunnyVideoId);
+
+        const { data: updateResult, error: updateError } = await supabase
+          .from('pending_uploads')
+          .update({ bunny_video_id: bunnyVideoId })
+          .eq('id', pendingUploadId)
+          .select();
+
+        if (updateError) {
+          console.error('❌ Error storing Bunny video ID:', updateError);
+        } else {
+          console.log('✅ Bunny video ID stored successfully');
+          console.log('   Updated record:', updateResult);
         }
-        return;
+      } catch (createError: any) {
+        console.error('❌ Failed to create video on Bunny.net:', createError.message);
+        throw new Error(`Failed to create video: ${createError.message}`);
       }
 
       // Update progress: 20% - Uploading video file
@@ -530,19 +649,16 @@ export default function UploadScreen() {
         .update({ upload_progress: 20 })
         .eq('id', pendingUploadId);
 
-      // Upload video file
+      // 🚨 CRITICAL: Upload video file
       console.log('📤 Uploading video file to Bunny.net...');
-      await uploadToStream(bunnyVideoId, videoUri);
-      console.log('✅ Video uploaded to stream');
-
-      // Check if upload was aborted after uploading
-      if (abortControllerRef.current?.signal.aborted) {
-        console.log('⚠️ Upload aborted after uploading, deleting from Bunny.net...');
-        if (bunnyVideoId) {
-          await deleteStreamVideo(bunnyVideoId);
-          console.log('✅ Video deleted from Bunny.net');
-        }
-        return;
+      try {
+        await uploadToStream(bunnyVideoId, videoUri, isPremium);
+        
+        console.log('✅ Video uploaded successfully');
+      } catch (uploadError: any) {
+        console.error('❌ Failed to upload video file:', uploadError.message);
+        
+        throw new Error(`Failed to upload video: ${uploadError.message}`);
       }
 
       // Update progress: 60% - Processing video
@@ -556,51 +672,31 @@ export default function UploadScreen() {
       console.log('⏳ Waiting for video processing...');
       let processed = false;
       let attempts = 0;
-      const maxAttempts = 30;
+      const maxAttempts = 120;
 
       while (!processed && attempts < maxAttempts) {
-        // Check if upload was aborted during processing
-        if (abortControllerRef.current?.signal.aborted) {
-          console.log('⚠️ Upload aborted during processing, deleting from Bunny.net...');
-          if (bunnyVideoId) {
-            await deleteStreamVideo(bunnyVideoId);
-            console.log('✅ Video deleted from Bunny.net');
-          }
-          return;
-        }
-
         await new Promise(resolve => setTimeout(resolve, 2000));
-        const status = await getVideoStatus(bunnyVideoId);
-        console.log(`Video status check ${attempts + 1}/${maxAttempts}:`, status);
+        const status = await getVideoStatus(bunnyVideoId, isPremium);
         
-        // Update progress incrementally during processing
         const processingProgress = 60 + Math.min(attempts * 1, 30);
         await supabase
           .from('pending_uploads')
           .update({ upload_progress: processingProgress })
           .eq('id', pendingUploadId);
         
+        console.log(`⏳ Attempt ${attempts + 1}/${maxAttempts} - Bunny status: ${status.status}`);
         if (status.status === 4) {
           processed = true;
-          console.log('✅ Video processing complete!');
+          console.log('✅ Video processing complete');
+        } else if (status.status === 5 || status.status === 6) {
+          console.log('❌ Video processing failed on Bunny.net, status:', status.status);
+          throw new Error('Video processing failed on Bunny.net');
         }
         attempts++;
       }
 
       if (!processed) {
-        throw new Error('Video processing timeout');
-      }
-
-      console.log('✅ Video processed successfully');
-
-      // Final check before saving to database
-      if (abortControllerRef.current?.signal.aborted) {
-        console.log('⚠️ Upload aborted before saving to database, deleting from Bunny.net...');
-        if (bunnyVideoId) {
-          await deleteStreamVideo(bunnyVideoId);
-          console.log('✅ Video deleted from Bunny.net');
-        }
-        return;
+        throw new Error('Video processing timeout - please try again');
       }
 
       // Update progress: 95% - Saving to database
@@ -611,9 +707,20 @@ export default function UploadScreen() {
         .eq('id', pendingUploadId);
 
       const videoUrl = bunnyVideoId;
-      const thumbnailUrl = `https://${process.env.EXPO_PUBLIC_BUNNY_STREAM_CDN_HOSTNAME}/${bunnyVideoId}/thumbnail.jpg`;
+
+      // 🆕 Determine which library and CDN to use based on premium status
+      const libraryId = isPremium ? 597832 : 517995;
+      const cdnHostname = isPremium 
+        ? Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_PREMIUM_CDN_HOSTNAME 
+        : Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_CDN_HOSTNAME;
+
+      const thumbnailUrl = `https://${cdnHostname}/${bunnyVideoId}/thumbnail.jpg`;
 
       console.log('💾 Saving video to database...');
+      console.log('  - Library ID:', libraryId, isPremium ? '(Premium)' : '(Free)');
+      console.log('  - CDN Hostname:', cdnHostname);
+      console.log('  - Thumbnail URL:', thumbnailUrl);
+
       const videoRecord: any = {
         user_id: userId,
         video_url: videoUrl,
@@ -625,7 +732,9 @@ export default function UploadScreen() {
         location_name: loc.name,
         location_privacy: privacy,
         moderation_status: 'pending',
-        is_approved: false, // Start as not approved until moderation completes
+        is_approved: false,
+        request_id: reqId || null,
+        library_id: libraryId,
       };
 
       const { data: video, error: dbError } = await supabase
@@ -636,200 +745,224 @@ export default function UploadScreen() {
 
       if (dbError) {
         console.error('❌ Database error:', dbError);
-        throw dbError;
+        throw new Error('Failed to save video to database');
       }
 
-      console.log('✅ Video saved to database:', video.id);
+      videoRecordId = video.id;
+console.log('✅ Video saved to database:', video.id);
 
-      // If this fulfills a request, create fulfillment record
-      if (reqId) {
-        console.log('📝 Creating request fulfillment record...');
-        const { error: fulfillmentError } = await supabase
-          .from('request_fulfillments')
-          .insert({
-            request_id: reqId,
-            video_id: video.id,
-            user_id: userId,
-          });
+// 🚨 CRITICAL: If this fulfills a request, create fulfillment record
+if (reqId) {
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('📝 CREATING REQUEST FULFILLMENT');
+  console.log('  Request ID:', reqId);
+  console.log('  Video ID:', video.id);
+  console.log('  User ID:', userId);
+  
+  const { data: fulfillmentData, error: fulfillmentError } = await supabase
+    .from('request_fulfillments')
+    .insert({
+      request_id: reqId,
+      video_id: video.id,
+      user_id: userId,
+    })
+    .select()
+    .single();
 
-        if (fulfillmentError) {
-          console.error('❌ Error creating fulfillment:', fulfillmentError);
-        } else {
-          console.log('✅ Request fulfillment created successfully');
-        }
-      }
+  if (fulfillmentError) {
+    console.error('❌ CRITICAL ERROR: Failed to create fulfillment record!');
+    console.error('Error details:', fulfillmentError);
+    console.error('This means the requester will NOT see this video!');
+    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    
+    // Don't throw - let the upload complete, but log the issue prominently
+    // The video is still saved, but won't appear in fulfillments
+  } else {
+    console.log('✅ Request fulfillment created successfully');
+    console.log('Fulfillment ID:', fulfillmentData.id);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  }
+} else {
+  console.log('ℹ️ This is not a request fulfillment (no request_id)');
+}
 
-      // Update progress: 100% - Complete
-      console.log('📊 Progress: 100% - Complete');
-      await supabase
-        .from('pending_uploads')
-        .update({ upload_progress: 100, status: 'completed' })
-        .eq('id', pendingUploadId);
-
-      // Delete pending upload record after a short delay
-      setTimeout(async () => {
-        console.log('🧹 Cleaning up pending upload record...');
-        await supabase
-          .from('pending_uploads')
-          .delete()
-          .eq('id', pendingUploadId);
-        console.log('✅ Pending upload record deleted');
-      }, 3000);
-
-      // 🚨 CRITICAL: Call moderate-video Edge Function to trigger AI moderation
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('🔍 TRIGGERING AWS REKOGNITION MODERATION');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('Video ID:', video.id);
-      console.log('Video URL:', videoUrl);
-      console.log('User ID:', userId);
-      
-      try {
-        const { data: moderationData, error: moderationError } = await supabase.functions.invoke(
-          'moderate-video',
-          {
-            body: {
-              videoId: video.id,
-              videoUrl: videoUrl,
-              thumbnailUrl: thumbnailUrl,
-              userId: userId,
-            },
-          }
-        );
-
-        if (moderationError) {
-          console.error('❌ Moderation invocation error:', moderationError);
-          console.error('Error details:', JSON.stringify(moderationError, null, 2));
-        } else {
-          console.log('✅ AWS Rekognition moderation triggered successfully');
-          console.log('Moderation response:', moderationData);
-        }
-      } catch (moderationError: any) {
-        console.error('❌ Error calling moderation function:', moderationError);
-        console.error('Error message:', moderationError.message);
-        console.error('Error stack:', moderationError.stack);
-      }
-
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('✅ BACKGROUND UPLOAD COMPLETED SUCCESSFULLY');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-    } catch (error: any) {
-      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.error('❌ BACKGROUND UPLOAD ERROR');
-      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.error('Error:', error);
-      
-      // If upload failed, delete video from Bunny.net if it was created
-      if (bunnyVideoId) {
-        console.log('🗑️ Cleaning up failed upload from Bunny.net...');
-        try {
-          await deleteStreamVideo(bunnyVideoId);
-          console.log('✅ Failed video deleted from Bunny.net');
-        } catch (deleteError) {
-          console.error('❌ Error deleting failed video:', deleteError);
-        }
-      }
-      
+      // Update progress: 100% - Complete, then DELETE the pending upload
+      console.log('📊 Progress: 100% - Upload complete');
       await supabase
         .from('pending_uploads')
         .update({ 
-          status: 'failed',
-          error_message: error.message || 'Unknown error'
+          upload_progress: 100, 
+          status: 'completed'
         })
         .eq('id', pendingUploadId);
+
+      // DELETE the pending upload immediately - video is now in the videos table
+      console.log('🗑️ Deleting pending upload record (upload complete)');
+      await supabase
+        .from('pending_uploads')
+        .delete()
+        .eq('id', pendingUploadId);
+
+      console.log('✅ Pending upload card removed');
+
+      // 🚀 Trigger video moderation asynchronously (fire and forget)
+      console.log('🚀 Triggering video moderation...');
+
+      supabase.functions
+        .invoke('moderate-video', {
+          body: {
+            videoId: video.id,
+            videoUrl: videoUrl,
+            thumbnailUrl: thumbnailUrl,
+            userId: userId,
+            requestId: reqId || null,
+          },
+        })
+        .then((response) => {
+          console.log('✅ Video moderation triggered:', response);
+        })
+        .catch((error) => {
+          console.error('⚠️ Video moderation trigger failed (non-critical):', error);
+        });
+
+      console.log('✅ Upload completed successfully');
+
+    } catch (error: any) {
+      console.error('❌ Upload failed:', error.message);
+      
+      // Clean up failed upload
+      await cleanupFailedUpload(pendingUploadId, bunnyVideoId, videoRecordId, isPremium);
     } finally {
-      // Reset upload flags after completion or error
-      console.log('🔓 Resetting upload flags...');
+      // Reset upload flags
       uploadInProgressRef.current = false;
-      abortControllerRef.current = null;
-      currentBunnyVideoIdRef.current = null;
-      currentPendingUploadIdRef.current = null;
-      // Note: We don't reset uploadStartedRef because the user has already navigated away
-      // This prevents them from uploading the same video again if they come back to this screen
+      uploadStartedRef.current = false;
+      setIsUploading(false);
     }
   };
 
-  const handleCancelUpload = () => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🚫 USER TAPPED CANCEL UPLOAD');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('isUploading:', isUploading);
-    console.log('uploadInProgressRef.current:', uploadInProgressRef.current);
+  /**
+   * Clean up a failed or cancelled upload
+   * Deletes from Bunny.net, database, and pending uploads table
+   */
+  const cleanupFailedUpload = useCallback(async (
+    pendingUploadId: string,
+    bunnyVideoId: string | null,
+    videoRecordId: string | null,
+    isPremium: boolean = false
+  ) => {
+    console.log('🧹 === CLEANING UP FAILED/CANCELLED UPLOAD ===');
+    console.log('  - Pending Upload ID:', pendingUploadId);
+    console.log('  - Bunny Video ID:', bunnyVideoId || 'None');
+    console.log('  - Video Record ID:', videoRecordId || 'None');
     
-    if (isUploading || uploadInProgressRef.current) {
-      Alert.alert(
-        'Cancel Upload',
-        'Are you sure you want to cancel this upload? The video will be deleted.',
-        [
-          { text: 'Continue Upload', style: 'cancel' },
-          {
-            text: 'Cancel Upload',
-            style: 'destructive',
-            onPress: async () => {
-              console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-              console.log('🗑️ CANCELING UPLOAD');
-              console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-              
-              // 1. Abort the upload request
-              if (abortControllerRef.current) {
-                console.log('⚠️ Aborting upload request...');
-                abortControllerRef.current.abort();
-                console.log('✅ Upload request aborted');
-              }
-              
-              // 2. Delete video from Bunny.net if it was created
-              if (currentBunnyVideoIdRef.current) {
-                console.log('🗑️ Deleting video from Bunny.net...');
-                console.log('Video ID:', currentBunnyVideoIdRef.current);
-                try {
-                  await deleteStreamVideo(currentBunnyVideoIdRef.current);
-                  console.log('✅ Video deleted from Bunny.net');
-                } catch (error) {
-                  console.error('❌ Error deleting video from Bunny.net:', error);
-                }
-              }
-              
-              // 3. Delete pending upload record from database
-              if (currentPendingUploadIdRef.current) {
-                console.log('🗑️ Deleting pending upload record from database...');
-                console.log('Pending Upload ID:', currentPendingUploadIdRef.current);
-                try {
-                  await supabase
-                    .from('pending_uploads')
-                    .delete()
-                    .eq('id', currentPendingUploadIdRef.current);
-                  console.log('✅ Pending upload record deleted');
-                } catch (error) {
-                  console.error('❌ Error deleting pending upload record:', error);
-                }
-              }
-              
-              // 4. Reset all flags
-              console.log('🔓 Resetting all upload flags...');
-              uploadStartedRef.current = false;
-              uploadInProgressRef.current = false;
-              setIsUploading(false);
-              abortControllerRef.current = null;
-              currentBunnyVideoIdRef.current = null;
-              currentPendingUploadIdRef.current = null;
-              console.log('✅ All flags reset');
-              
-              console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-              console.log('✅ UPLOAD CANCELED SUCCESSFULLY');
-              console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-              
-              // 5. Navigate back
-              router.back();
-            },
-          },
-        ]
-      );
+    const cleanupResults = {
+      bunny: false,
+      database: false,
+      pending: false,
+    };
+    
+    // Delete from Bunny.net if video was created
+    if (bunnyVideoId) {
+      console.log('🗑️ Deleting video from Bunny.net...');
+      try {
+        await deleteStreamVideo(bunnyVideoId, isPremium);
+        console.log('✅ Video deleted from Bunny.net');
+        cleanupResults.bunny = true;
+      } catch (deleteError: any) {
+        console.error('⚠️ Error deleting from Bunny.net:', deleteError.message);
+      }
     } else {
-      console.log('No upload in progress, navigating back');
-      router.back();
+      console.log('ℹ️ No Bunny video ID, skipping Bunny.net deletion');
     }
-  };
+    
+    // Delete from database if record was created
+    if (videoRecordId) {
+      console.log('🗑️ Deleting video record from database...');
+      try {
+        const { error: deleteError } = await supabase
+          .from('videos')
+          .delete()
+          .eq('id', videoRecordId);
+        
+        if (deleteError) {
+          console.error('⚠️ Database delete error:', deleteError);
+        } else {
+          console.log('✅ Video record deleted from database');
+          cleanupResults.database = true;
+        }
+      } catch (deleteError: any) {
+        console.error('⚠️ Error deleting from database:', deleteError.message);
+      }
+    } else {
+      console.log('ℹ️ No video record ID, skipping database deletion');
+    }
+    
+    // Always try to delete pending upload record
+    if (pendingUploadId) {
+      console.log('🗑️ Cleaning up pending upload record...');
+      try {
+        const { error: deleteError } = await supabase
+          .from('pending_uploads')
+          .delete()
+          .eq('id', pendingUploadId);
+        
+        if (deleteError) {
+          console.error('⚠️ Pending upload delete error:', deleteError);
+        } else {
+          console.log('✅ Pending upload record deleted');
+          cleanupResults.pending = true;
+        }
+      } catch (deleteError: any) {
+        console.error('⚠️ Error deleting pending upload:', deleteError.message);
+      }
+    }
+    
+    console.log('🧹 Cleanup Results:');
+    console.log('  - Bunny.net:', cleanupResults.bunny ? '✅' : '❌');
+    console.log('  - Database:', cleanupResults.database ? '✅' : '❌');
+    console.log('  - Pending:', cleanupResults.pending ? '✅' : '❌');
+    console.log('✅ Cleanup complete');
+    
+    return cleanupResults;
+  }, []);
+
+  // 📍 LOCATION DENIED SCREEN
+  if (locationDenied) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <LinearGradient colors={[colors.primary, colors.secondary]} style={styles.header}>
+          <Pressable onPress={() => router.back()} style={styles.backButton}>
+            <IconSymbol ios_icon_name="chevron.left" android_material_icon_name="arrow-back" size={24} color="#FFFFFF" />
+          </Pressable>
+          <Text style={styles.headerTitle}>Location Required</Text>
+          <View style={{ width: 40 }} />
+        </LinearGradient>
+        <View style={styles.locationDeniedContainer}>
+          <IconSymbol ios_icon_name="location.slash.fill" android_material_icon_name="location-off" size={80} color={colors.primary} />
+          <Text style={styles.locationDeniedTitle}>Location Access Required</Text>
+          <Text style={styles.locationDeniedText}>
+            POPNOW is a location-based video platform. Your location is needed to pin your video on the map so people around the world can discover it.
+          </Text>
+          <Text style={styles.locationDeniedSubtext}>
+            Without location access, you can still browse, watch, like, comment, follow users, and create video requests.
+          </Text>
+          <Pressable
+            style={styles.openSettingsButton}
+            onPress={() => Linking.openSettings()}
+          >
+            <IconSymbol ios_icon_name="gear" android_material_icon_name="settings" size={20} color="#FFFFFF" />
+            <Text style={styles.openSettingsButtonText}>Open Settings</Text>
+          </Pressable>
+          <Pressable
+            style={styles.goBackButton}
+            onPress={() => router.back()}
+          >
+            <Text style={styles.goBackButtonText}>Go Back</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   if (isLoading) {
     return (
@@ -854,8 +987,17 @@ export default function UploadScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <LinearGradient colors={[colors.primary, colors.secondary]} style={styles.header}>
-        <Pressable onPress={handleCancelUpload} style={styles.backButton}>
-          <IconSymbol ios_icon_name="chevron.left" android_material_icon_name="arrow-back" size={24} color="#FFFFFF" />
+        <Pressable 
+          onPress={() => router.back()} 
+          style={styles.backButton}
+          disabled={isUploading}
+        >
+          <IconSymbol 
+            ios_icon_name="chevron.left" 
+            android_material_icon_name="arrow-back" 
+            size={24} 
+            color={isUploading ? '#666666' : '#FFFFFF'} 
+          />
         </Pressable>
         <Text style={styles.headerTitle}>
           {requestId ? 'Fulfill Request' : 'Upload Video'}
@@ -865,8 +1007,8 @@ export default function UploadScreen() {
 
       <KeyboardAvoidingView
         style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 20}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={0}
       >
         <ScrollView
           style={styles.content}
@@ -996,35 +1138,57 @@ export default function UploadScreen() {
           </View>
 
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Location Privacy</Text>
-            <View style={styles.privacyOptions}>
-              {(['exact', '3km', '10km'] as LocationPrivacy[]).map((privacy) => (
-                <Pressable
-                  key={privacy}
-                  style={[
-                    styles.privacyOption,
-                    locationPrivacy === privacy && styles.privacyOptionActive,
-                  ]}
-                  onPress={() => setLocationPrivacy(privacy)}
-                >
-                  <IconSymbol
-                    ios_icon_name={getPrivacyIcon(privacy)}
-                    android_material_icon_name="circle"
-                    size={24}
-                    color={locationPrivacy === privacy ? '#FFFFFF' : colors.text}
-                  />
-                  <Text
-                    style={[
-                      styles.privacyOptionText,
-                      locationPrivacy === privacy && styles.privacyOptionTextActive,
-                    ]}
-                  >
-                    {getPrivacyDescription(privacy)}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-          </View>
+  <Text style={styles.sectionTitle}>Location Privacy</Text>
+  <View style={styles.privacyOptions}>
+    {(['exact', '3km', '10km'] as LocationPrivacy[]).map((privacy) => (
+  <Pressable
+  key={privacy}
+  style={[
+    styles.privacyOption,
+    locationPrivacy === privacy && styles.privacyOptionActive,
+  ]}
+  onPress={() => setLocationPrivacy(privacy)}
+>
+        <IconSymbol
+          ios_icon_name={getPrivacyIcon(privacy)}
+          android_material_icon_name="circle"
+          size={24}
+          color={locationPrivacy === privacy ? '#FFFFFF' : colors.text}
+        />
+        <Text
+          style={[
+            styles.privacyOptionText,
+            locationPrivacy === privacy && styles.privacyOptionTextActive,
+          ]}
+        >
+          {getPrivacyDescription(privacy)}
+        </Text>
+      </Pressable>
+    ))}
+  </View>
+</View>
+
+          {/* Watermark Notice - Only show for free users */}
+          {!isPremium && (
+            <Pressable 
+              style={styles.watermarkNotice}
+              onPress={() => router.push('/settings')}
+            >
+              <View style={styles.watermarkHeader}>
+                <IconSymbol 
+                  ios_icon_name="info.circle.fill" 
+                  android_material_icon_name="info" 
+                  size={20} 
+                  color={colors.primary} 
+                />
+                <Text style={styles.watermarkTitle}>Watermark Notice</Text>
+              </View>
+              <Text style={styles.watermarkText}>
+                A POPNOW watermark will be added to your video. Free users can upload up to <Text style={{ fontWeight: '700' }}>5 videos per hour</Text>.
+                <Text style={styles.watermarkLink}> Upgrade to Premium</Text> to <Text style={{ fontWeight: '700' }}>remove watermarks, get unlimited uploads, and download your videos without any branding</Text>.
+              </Text>
+            </Pressable>
+          )}
 
           <Pressable
             style={[styles.uploadButton, isUploading && styles.uploadButtonDisabled]}
@@ -1131,7 +1295,7 @@ const styles = StyleSheet.create({
     color: colors.primary,
   },
   videoPreview: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.card,
     borderRadius: 12,
     padding: 24,
     alignItems: 'center',
@@ -1154,9 +1318,9 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   descriptionInput: {
-    backgroundColor: colors.surface,
+    backgroundColor: colors.card,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.textSecondary + '30',
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 12,
@@ -1180,9 +1344,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 20,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.card,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.textSecondary + '30',
   },
   hashtagChipActive: {
     backgroundColor: colors.primary,
@@ -1200,9 +1364,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.card,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.textSecondary + '30',
     borderRadius: 12,
     padding: 16,
   },
@@ -1227,9 +1391,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
     padding: 16,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.card,
     borderWidth: 2,
-    borderColor: colors.border,
+    borderColor: colors.textSecondary + '30',
     borderRadius: 12,
   },
   privacyOptionActive: {
@@ -1286,5 +1450,88 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: colors.text,
     lineHeight: 20,
+  },
+  watermarkNotice: {
+    backgroundColor: '#fff8dc',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 16,
+    borderLeftWidth: 4,
+    borderLeftColor: colors.primary,
+  },
+  watermarkHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  watermarkTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.text,
+  },
+  watermarkText: {
+    fontSize: 13,
+    color: '#666',
+    lineHeight: 19,
+  },
+  watermarkLink: {
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  // 📍 Location Denied Screen styles
+  locationDeniedContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
+  },
+  locationDeniedTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: colors.text,
+    marginTop: 24,
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  locationDeniedText: {
+    fontSize: 15,
+    color: colors.text,
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 12,
+  },
+  locationDeniedSubtext: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 32,
+  },
+  openSettingsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: colors.primary,
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+    borderRadius: 12,
+    marginBottom: 16,
+    width: '100%',
+  },
+  openSettingsButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  goBackButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 32,
+  },
+  goBackButtonText: {
+    fontSize: 15,
+    fontWeight: '500',
+    color: colors.textSecondary,
   },
 });

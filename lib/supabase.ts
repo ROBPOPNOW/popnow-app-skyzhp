@@ -1,11 +1,12 @@
-
 import 'react-native-url-polyfill/auto';
 import { createClient } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 
-const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
-const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
+// Read from app.json extra config (works in production builds!)
+const supabaseUrl = Constants.expoConfig?.extra?.EXPO_PUBLIC_SUPABASE_URL || '';
+const supabaseAnonKey = Constants.expoConfig?.extra?.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
 
 // Log configuration status (without exposing sensitive data)
 console.log('Supabase Configuration:', {
@@ -16,7 +17,7 @@ console.log('Supabase Configuration:', {
 });
 
 if (!supabaseUrl || !supabaseAnonKey) {
-  console.error('⚠️ Supabase configuration is missing! Please check your .env file.');
+  console.error('⚠️ Supabase configuration is missing! Please check your app.json.');
   console.error('Required variables: EXPO_PUBLIC_SUPABASE_URL, EXPO_PUBLIC_SUPABASE_ANON_KEY');
 }
 
@@ -26,7 +27,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     storage: AsyncStorage,
     autoRefreshToken: true,
     persistSession: true,
-    detectSessionInUrl: false,
+    detectSessionInUrl: true,
   },
 });
 

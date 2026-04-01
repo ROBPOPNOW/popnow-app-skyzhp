@@ -1,5 +1,4 @@
-
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { View, StyleSheet, ActivityIndicator, Pressable, Text } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { colors } from '@/styles/commonStyles';
@@ -25,9 +24,12 @@ interface LeafletMapProps {
   showHeatmap?: boolean;
   heatmapData?: Array<{ latitude: number; longitude: number; intensity: number }>;
   userLocation?: { latitude: number; longitude: number } | null;
+  isGpsReady?: boolean;
+  locationDenied?: boolean;
+  onZoomChange?: (level: 'world' | 'country' | 'city') => void;  // ← ADD THIS
 }
 
-export default function LeafletMap({
+function LeafletMap({
   markers = [],
   center,
   zoom = 12,
@@ -37,35 +39,39 @@ export default function LeafletMap({
   showHeatmap = false,
   heatmapData = [],
   userLocation,
+  isGpsReady = false,
+  locationDenied = false,
+  onZoomChange,  // ← ADD THIS
 }: LeafletMapProps) {
   const webViewRef = useRef<WebView>(null);
   const [isMapReady, setIsMapReady] = useState(false);
   const [currentZoom, setCurrentZoom] = useState(zoom);
-  const [isHeatmapMode, setIsHeatmapMode] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState<'world' | 'country' | 'city'>('city');
   
-  const updateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const updateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Add this RIGHT AFTER the useRef declarations
+useEffect(() => {
+  return () => {
+  };
+}, []);
+  
+  // ✅ SAVE INITIAL CENTER AND ZOOM - NEVER CHANGES AFTER FIRST RENDER
+  const initialCenter = useRef(center || { latitude: -36.8485, longitude: 174.7633 });
+  const initialZoom = useRef(zoom);
 
   // Update markers when they change
   useEffect(() => {
-    if (!isMapReady || !webViewRef.current) {
-      console.log('⏳ Map not ready yet, skipping marker update');
-      return;
-    }
+    if (!isMapReady || !webViewRef.current) return;
+    
+    // ✅ REMOVED: Early return for empty markers
+    // We MUST allow empty marker arrays to clear the map properly
 
-    if (markers.length === 0) {
-      console.log('⚠️ No markers to display');
-      return;
-    }
-
-    // Clear any pending updates
     if (updateTimeoutRef.current) {
       clearTimeout(updateTimeoutRef.current);
     }
 
-    // Schedule update with a small delay to batch updates
     updateTimeoutRef.current = setTimeout(() => {
-      console.log('📍 Updating markers on map:', markers.length);
-
       const markersData = markers.map(marker => ({
         id: marker.id,
         videoIds: marker.videoIds || [],
@@ -77,16 +83,11 @@ export default function LeafletMap({
         isRequest: marker.isRequest || marker.id.startsWith('request_'),
       }));
 
-      console.log('Sample marker data:', markersData[0]);
-
       webViewRef.current?.injectJavaScript(`
         (function() {
           try {
             if (window.updateMarkers) {
-              console.log('Calling updateMarkers with ${markersData.length} markers');
               window.updateMarkers(${JSON.stringify(markersData)});
-            } else {
-              console.error('updateMarkers function not available');
             }
           } catch (error) {
             console.error('Error in updateMarkers:', error);
@@ -97,13 +98,9 @@ export default function LeafletMap({
     }, 300);
   }, [markers, isMapReady]);
 
-  // Update heatmap when data changes
+  // Update heatmap
   useEffect(() => {
-    if (!isMapReady || !webViewRef.current || !showHeatmap || heatmapData.length === 0) {
-      return;
-    }
-
-    console.log('🔥 Updating heatmap:', heatmapData.length, 'points');
+    if (!isMapReady || !webViewRef.current || !showHeatmap || heatmapData.length === 0) return;
 
     const heatData = heatmapData.map(point => ({
       lat: point.latitude,
@@ -125,13 +122,9 @@ export default function LeafletMap({
     `);
   }, [heatmapData, showHeatmap, isMapReady]);
 
-  // Update user location when it changes
+  // Update user location
   useEffect(() => {
-    if (!isMapReady || !webViewRef.current || !userLocation) {
-      return;
-    }
-
-    console.log('📍 Updating user location:', userLocation);
+    if (!isMapReady || !webViewRef.current || !userLocation || locationDenied) return;
 
     webViewRef.current.injectJavaScript(`
       (function() {
@@ -158,33 +151,34 @@ export default function LeafletMap({
   const handleMessage = (event: any) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
-      console.log('📨 Message from map:', data.type);
 
       switch (data.type) {
         case 'mapReady':
-          console.log('✅ Map is ready');
           setIsMapReady(true);
           break;
-          
         case 'markerClick':
           if (onMarkerPress) {
-            console.log('🎯 Marker clicked:', data.markerId, 'Video IDs:', data.videoIds);
             onMarkerPress(data.markerId, data.videoIds || []);
           }
           break;
-          
         case 'doubleTap':
           if (onDoubleTap) {
-            console.log('👆 Map double-tapped at:', data.location);
             onDoubleTap(data.location);
           }
           break;
-          
         case 'zoomChange':
-          console.log('🔍 Zoom changed to:', data.zoom);
-          setCurrentZoom(data.zoom);
-          setIsHeatmapMode(data.zoom < 10);
-          break;
+  setCurrentZoom(data.zoom);
+  if (data.zoom <= 5) {
+    setZoomLevel('world');
+    if (onZoomChange) onZoomChange('world');  // ← ADD THIS
+  } else if (data.zoom <= 9) {
+    setZoomLevel('country');
+    if (onZoomChange) onZoomChange('country');  // ← ADD THIS
+  } else {
+    setZoomLevel('city');
+    if (onZoomChange) onZoomChange('city');  // ← ADD THIS
+  }
+  break;
       }
     } catch (error) {
       console.error('Error parsing message from map:', error);
@@ -192,7 +186,6 @@ export default function LeafletMap({
   };
 
   const handleLocateMe = () => {
-    console.log('📍 Locate me pressed');
     if (onLocateMePress) {
       onLocateMePress();
     }
@@ -213,30 +206,24 @@ export default function LeafletMap({
     }
   };
 
-  const htmlContent = `
+  // ✅ CREATE HTML ONLY ONCE WITH INITIAL CENTER
+  const htmlContent = useMemo(() => {
+    return `
     <!DOCTYPE html>
     <html>
     <head>
       <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
       <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+      <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+      <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
       <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
       <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
       <style>
-        * {
-          margin: 0;
-          padding: 0;
-          box-sizing: border-box;
-        }
-        body, html {
-          height: 100%;
-          width: 100%;
-          overflow: hidden;
-        }
-        #map {
-          height: 100%;
-          width: 100%;
-          background: #f5f5f5;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body, html { height: 100%; width: 100%; overflow: hidden; }
+        #map { height: 100%; width: 100%; background: #f5f5f5; }
+        
         .video-marker {
           border: 3px solid #FFFFFF;
           border-radius: 50%;
@@ -252,18 +239,11 @@ export default function LeafletMap({
           cursor: pointer;
           transition: transform 0.2s ease;
         }
-        .video-marker:hover {
-          transform: scale(1.1);
-        }
-        .video-marker-exact {
-          background: linear-gradient(135deg, #FF6B6B 0%, #FF8E53 100%);
-        }
-        .video-marker-3km {
-          background: linear-gradient(135deg, #FFD93D 0%, #FFA500 100%);
-        }
-        .video-marker-10km {
-          background: linear-gradient(135deg, #6C5CE7 0%, #4169E1 100%);
-        }
+        .video-marker:hover { transform: scale(1.1); }
+        .video-marker-exact { background: linear-gradient(135deg, #FF6B6B 0%, #FF8E53 100%); }
+        .video-marker-3km { background: linear-gradient(135deg, #FFD93D 0%, #FFA500 100%); }
+        .video-marker-10km { background: linear-gradient(135deg, #6C5CE7 0%, #4169E1 100%); }
+        
         .request-marker {
           font-size: 28px;
           text-align: center;
@@ -272,148 +252,189 @@ export default function LeafletMap({
           cursor: pointer;
           transition: transform 0.2s ease;
         }
-        .request-marker:hover {
-          transform: scale(1.15);
+        .request-marker:hover { transform: scale(1.15); }
+        
+        .rainbow-cluster {
+          background: linear-gradient(135deg, #FF00FF 0%, #00FFFF 25%, #FFFF00 50%, #FF00FF 75%, #00FFFF 100%);
+          border: 4px solid #FFFFFF;
+          border-radius: 50%;
+          width: 50px;
+          height: 50px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 22px;
+          font-weight: 900;
+          color: #0000009c;
+          text-shadow: none;
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0);
+          line-height: 1;
         }
+
+        .country-cluster {
+          background: linear-gradient(135deg, #FF69B4 0%, #7952B3 100%);
+          border: 3px solid #FFFFFF;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 900;
+          color: #FFFFFF;
+          box-shadow: 0 4px 15px rgba(255, 105, 180, 0.5);
+          line-height: 1;
+          text-shadow: none;
+        }
+        .country-cluster-small { width: 45px; height: 45px; font-size: 16px; }
+        .country-cluster-medium { width: 55px; height: 55px; font-size: 18px; }
+        .country-cluster-large { width: 65px; height: 65px; font-size: 20px; }
+
+        .hotspot-dot {
+          border-radius: 50%;
+          background: radial-gradient(circle, rgba(255, 105, 180, 0.9) 0%, rgba(255, 105, 180, 0.4) 50%, rgba(255, 105, 180, 0) 70%);
+          animation: hotspot-pulse 2s ease-in-out infinite;
+          cursor: pointer;
+        }
+        .hotspot-dot-small { width: 30px; height: 30px; }
+        .hotspot-dot-medium { width: 50px; height: 50px; }
+        .hotspot-dot-large { width: 70px; height: 70px; }
+        @keyframes hotspot-pulse {
+          0%, 100% { transform: scale(1); opacity: 0.8; }
+          50% { transform: scale(1.3); opacity: 1; }
+        }
+
         .user-marker {
           background: linear-gradient(135deg, #00D084 0%, #00A86B 100%);
           border: 4px solid #FFFFFF;
           border-radius: 50%;
           width: 24px;
           height: 24px;
-          box-shadow: 0 0 0 4px rgba(0, 208, 132, 0.3),
-                      0 2px 8px rgba(0,0,0,0.3);
-          animation: pulse 2s ease-in-out infinite;
+          box-shadow: 0 0 0 4px rgba(0, 208, 132, 0.3), 0 2px 8px rgba(0,0,0,0.3);
+          animation: user-pulse 2s ease-in-out infinite;
         }
-        @keyframes pulse {
-          0%, 100% {
-            box-shadow: 0 0 0 4px rgba(0, 208, 132, 0.3),
-                        0 2px 8px rgba(0,0,0,0.3);
-          }
-          50% {
-            box-shadow: 0 0 0 8px rgba(0, 208, 132, 0.2),
-                        0 2px 12px rgba(0,0,0,0.4);
-          }
+        @keyframes user-pulse {
+          0%, 100% { box-shadow: 0 0 0 4px rgba(0, 208, 132, 0.3), 0 2px 8px rgba(0,0,0,0.3); }
+          50% { box-shadow: 0 0 0 8px rgba(0, 208, 132, 0.2), 0 2px 12px rgba(0,0,0,0.4); }
         }
-        .leaflet-popup-content-wrapper {
-          border-radius: 12px;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-        }
-        .leaflet-popup-content {
-          margin: 12px;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+        .marker-cluster-small, .marker-cluster-small div, .marker-cluster-small span,
+        .marker-cluster-medium, .marker-cluster-medium div, .marker-cluster-medium span,
+        .marker-cluster-large, .marker-cluster-large div, .marker-cluster-large span,
+        .leaflet-marker-icon span {
+          text-shadow: none !important;
         }
       </style>
     </head>
     <body>
       <div id="map"></div>
       <script>
-        console.log('🗺️ Initializing Leaflet map...');
-        
-        const HEATMAP_ZOOM_THRESHOLD = 10;
-        const MAP_CONFIG = {
-          zoomControl: true,
-          attributionControl: true,
-          minZoom: 3,
-          maxZoom: 19,
-          zoomAnimation: true,
-          fadeAnimation: true,
-          markerZoomAnimation: true,
-        };
+        var WORLD_MAX = 5;
+        var COUNTRY_MAX = 9;
 
-        const map = L.map('map', {
-          ...MAP_CONFIG,
-          center: [${center?.latitude || -36.8485}, ${center?.longitude || 174.7633}],
-          zoom: ${zoom},
-        });
+        var map = L.map('map', {
+  center: [${initialCenter.current.latitude}, ${initialCenter.current.longitude}],
+  zoom: ${initialZoom.current},  // ✅ CORRECT! Using saved initial zoom
+  zoomControl: false,
+  minZoom: 2,
+  maxZoom: 19,
+});
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
           attribution: '© OpenStreetMap',
           maxZoom: 19,
-          className: 'map-tiles',
         }).addTo(map);
 
-        let state = {
-          markers: new Map(),
-          markerLayerGroup: L.layerGroup().addTo(map),
+        var state = {
+          cityClusterGroup: L.markerClusterGroup({
+            maxClusterRadius: 60,
+            spiderfyOnMaxZoom: true,
+            showCoverageOnHover: false,
+            zoomToBoundsOnClick: true,
+            iconCreateFunction: function(cluster) {
+              return L.divIcon({
+                html: '<div class="rainbow-cluster">' + cluster.getChildCount() + '</div>',
+                className: '',
+                iconSize: L.point(50, 50),
+              });
+            }
+          }),
+          countryClusterGroup: L.markerClusterGroup({
+            maxClusterRadius: 120,
+            spiderfyOnMaxZoom: false,
+            showCoverageOnHover: false,
+            zoomToBoundsOnClick: true,
+            disableClusteringAtZoom: 10,
+            iconCreateFunction: function(cluster) {
+              return L.divIcon({
+                html: '<div class="rainbow-cluster">' + cluster.getChildCount() + '</div>',
+                className: '',
+                iconSize: L.point(50, 50),
+              });
+            }
+          }),
+          worldHotspotsGroup: L.layerGroup(),
+          requestLayerGroup: L.layerGroup(),
           heatmapLayer: null,
           userMarker: null,
-          currentZoom: ${zoom},
-          isHeatmapMode: ${zoom} < HEATMAP_ZOOM_THRESHOLD,
+          currentZoom: ${initialZoom.current},
+          currentLevel: 'city',
+          allMarkers: [],
           lastTap: 0,
         };
 
-        function notifyMapReady() {
-          window.ReactNativeWebView.postMessage(JSON.stringify({
-            type: 'mapReady'
-          }));
+        if (state.currentZoom <= WORLD_MAX) state.currentLevel = 'world';
+        else if (state.currentZoom <= COUNTRY_MAX) state.currentLevel = 'country';
+        else state.currentLevel = 'city';
+
+        function addCurrentLayers() {
+          if (state.currentLevel === 'world') map.addLayer(state.worldHotspotsGroup);
+          else if (state.currentLevel === 'country') map.addLayer(state.countryClusterGroup);
+          else {
+            map.addLayer(state.cityClusterGroup);
+            map.addLayer(state.requestLayerGroup);
+          }
         }
 
-        map.on('zoomend', function() {
-          const newZoom = map.getZoom();
-          const wasHeatmapMode = state.isHeatmapMode;
-          state.currentZoom = newZoom;
-          state.isHeatmapMode = newZoom < HEATMAP_ZOOM_THRESHOLD;
-          
-          console.log('Zoom:', newZoom, 'Heatmap mode:', state.isHeatmapMode);
-          
-          window.ReactNativeWebView.postMessage(JSON.stringify({
-            type: 'zoomChange',
-            zoom: newZoom
-          }));
+        function removeAllLayers() {
+          map.removeLayer(state.worldHotspotsGroup);
+          map.removeLayer(state.countryClusterGroup);
+          map.removeLayer(state.cityClusterGroup);
+          map.removeLayer(state.requestLayerGroup);
+          if (state.heatmapLayer) map.removeLayer(state.heatmapLayer);
+        }
 
-          if (state.isHeatmapMode !== wasHeatmapMode) {
-            toggleMapMode();
+        addCurrentLayers();
+
+        map.on('zoomend', function() {
+          var newZoom = map.getZoom();
+          var oldLevel = state.currentLevel;
+          state.currentZoom = newZoom;
+          if (newZoom <= WORLD_MAX) state.currentLevel = 'world';
+          else if (newZoom <= COUNTRY_MAX) state.currentLevel = 'country';
+          else state.currentLevel = 'city';
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'zoomChange', zoom: newZoom }));
+          if (oldLevel !== state.currentLevel) {
+            removeAllLayers();
+            addCurrentLayers();
           }
         });
 
-        function toggleMapMode() {
-          if (state.isHeatmapMode) {
-            console.log('Switching to heatmap mode');
-            if (state.markerLayerGroup) {
-              map.removeLayer(state.markerLayerGroup);
-            }
-            if (state.heatmapLayer) {
-              map.addLayer(state.heatmapLayer);
-            }
-          } else {
-            console.log('Switching to marker mode');
-            if (state.heatmapLayer) {
-              map.removeLayer(state.heatmapLayer);
-            }
-            if (state.markerLayerGroup) {
-              map.addLayer(state.markerLayerGroup);
-            }
-          }
-        }
-
         map.on('click', function(e) {
-          const now = Date.now();
-          const timeSinceLastTap = now - state.lastTap;
-          
-          if (timeSinceLastTap < 300 && timeSinceLastTap > 0) {
+          var now = Date.now();
+          if (now - state.lastTap < 300 && now - state.lastTap > 0) {
             window.ReactNativeWebView.postMessage(JSON.stringify({
               type: 'doubleTap',
-              location: {
-                latitude: e.latlng.lat,
-                longitude: e.latlng.lng
-              }
+              location: { latitude: e.latlng.lat, longitude: e.latlng.lng }
             }));
           }
-          
           state.lastTap = now;
         });
 
-        function getMarkerColorClass(privacyRadius) {
-          switch (privacyRadius) {
-            case '3km': return 'video-marker-3km';
-            case '10km': return 'video-marker-10km';
-            default: return 'video-marker-exact';
-          }
+        function getMarkerColorClass(r) {
+          return r === '3km' ? 'video-marker-3km' : r === '10km' ? 'video-marker-10km' : 'video-marker-exact';
         }
 
-        function createMarkerIcon(markerData) {
-          if (markerData.isRequest) {
+        function createCityMarkerIcon(m) {
+          if (m.isRequest) {
             return L.divIcon({
               html: '<div class="request-marker">🙋</div>',
               className: '',
@@ -422,12 +443,8 @@ export default function LeafletMap({
               popupAnchor: [0, -40],
             });
           }
-
-          const colorClass = getMarkerColorClass(markerData.privacyRadius);
-          const count = markerData.videoCount || 1;
-          
           return L.divIcon({
-            html: '<div class="video-marker ' + colorClass + '">' + count + '</div>',
+            html: '<div class="video-marker ' + getMarkerColorClass(m.privacyRadius) + '">' + (m.videoCount || 1) + '</div>',
             className: '',
             iconSize: [44, 44],
             iconAnchor: [22, 22],
@@ -435,138 +452,115 @@ export default function LeafletMap({
           });
         }
 
-        window.updateMarkers = function(markersData) {
-          console.log('📍 updateMarkers called with', markersData.length, 'markers');
-          
-          try {
-            // Clear existing markers
-            state.markerLayerGroup.clearLayers();
-            state.markers.clear();
-
-            // Add new markers
-            markersData.forEach(markerData => {
-              console.log('Adding marker:', markerData.id, 'at', markerData.lat, markerData.lng);
-              
-              const icon = createMarkerIcon(markerData);
-              const marker = L.marker([markerData.lat, markerData.lng], { 
-                icon: icon,
-                riseOnHover: true,
-              });
-
-              marker.on('click', function() {
-                console.log('Marker clicked:', markerData.id);
-                window.ReactNativeWebView.postMessage(JSON.stringify({
-                  type: 'markerClick',
-                  markerId: markerData.id,
-                  videoIds: markerData.videoIds || []
-                }));
-              });
-
-              if (markerData.title) {
-                const popupContent = '<div style="text-align: center;">' +
-                  '<strong>' + markerData.title + '</strong>' +
-                  (markerData.videoCount > 1 ? '<br/>' + markerData.videoCount + ' videos' : '') +
-                  '</div>';
-                marker.bindPopup(popupContent);
-              }
-
-              state.markerLayerGroup.addLayer(marker);
-              state.markers.set(markerData.id, marker);
+        function buildWorldHotspots(markersData) {
+          state.worldHotspotsGroup.clearLayers();
+          var grid = {}, gridSize = 10;
+          markersData.forEach(function(m) {
+            if (m.isRequest) return;
+            var key = Math.floor(m.lat/gridSize)*gridSize + ',' + Math.floor(m.lng/gridSize)*gridSize;
+            if (!grid[key]) grid[key] = { lat: 0, lng: 0, count: 0 };
+            grid[key].lat += m.lat;
+            grid[key].lng += m.lng;
+            grid[key].count += 1;
+          });
+          Object.keys(grid).forEach(function(key) {
+            var c = grid[key], lat = c.lat/c.count, lng = c.lng/c.count;
+            var cls = c.count >= 20 ? 'hotspot-dot-large' : c.count >= 5 ? 'hotspot-dot-medium' : 'hotspot-dot-small';
+            var sz = c.count >= 20 ? 70 : c.count >= 5 ? 50 : 30;
+            var h = L.marker([lat, lng], {
+              icon: L.divIcon({ html: '<div class="hotspot-dot ' + cls + '"></div>', className: '', iconSize: [sz, sz], iconAnchor: [sz/2, sz/2] })
             });
+            h.on('click', function() { map.setView([lat, lng], WORLD_MAX + 1, { animate: true }); });
+            state.worldHotspotsGroup.addLayer(h);
+          });
+        }
 
-            console.log('✅ Markers updated. Total:', state.markers.size);
-            
-            // Ensure correct mode is displayed
-            toggleMapMode();
-          } catch (error) {
-            console.error('❌ Error updating markers:', error);
-          }
+        window.updateMarkers = function(markersData) {
+          try {
+            state.allMarkers = markersData;
+            state.cityClusterGroup.clearLayers();
+            state.countryClusterGroup.clearLayers();
+            state.requestLayerGroup.clearLayers();
+            state.worldHotspotsGroup.clearLayers();
+            markersData.forEach(function(m) {
+              var icon = createCityMarkerIcon(m);
+              var cm = L.marker([m.lat, m.lng], { icon: icon, riseOnHover: true });
+              cm.on('click', function() {
+                window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'markerClick', markerId: m.id, videoIds: m.videoIds || [] }));
+              });
+              if (m.title) {
+                cm.bindPopup('<div style="text-align:center;"><strong>' + m.title + '</strong>' + (m.videoCount > 1 ? '<br/>' + m.videoCount + ' videos' : '') + '</div>');
+              }
+              if (m.isRequest) {
+                state.requestLayerGroup.addLayer(cm);
+              } else {
+                state.cityClusterGroup.addLayer(cm);
+                var cnm = L.marker([m.lat, m.lng]);
+                cnm.on('click', function() {
+                  window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'markerClick', markerId: m.id, videoIds: m.videoIds || [] }));
+                });
+                state.countryClusterGroup.addLayer(cnm);
+              }
+            });
+            buildWorldHotspots(markersData);
+          } catch (e) { console.error('Error updating markers:', e); }
         };
 
         window.updateUserLocation = function(lat, lng) {
-          console.log('📍 Updating user location:', lat, lng);
-          
           try {
-            if (state.userMarker) {
-              map.removeLayer(state.userMarker);
-            }
-
-            const userIcon = L.divIcon({
-              html: '<div class="user-marker"></div>',
-              className: '',
-              iconSize: [24, 24],
-              iconAnchor: [12, 12],
-            });
-
-            state.userMarker = L.marker([lat, lng], { 
-              icon: userIcon,
+            if (state.userMarker) map.removeLayer(state.userMarker);
+            state.userMarker = L.marker([lat, lng], {
+              icon: L.divIcon({ html: '<div class="user-marker"></div>', className: '', iconSize: [24, 24], iconAnchor: [12, 12] }),
               zIndexOffset: 1000,
             });
-            
             state.userMarker.addTo(map);
-            console.log('✅ User marker updated');
-          } catch (error) {
-            console.error('❌ Error updating user location:', error);
-          }
+          } catch (e) { console.error('Error updating user location:', e); }
         };
 
         window.centerOnUser = function(lat, lng) {
-          console.log('📍 Centering on user:', lat, lng);
-          map.setView([lat, lng], 15, { 
-            animate: true,
-            duration: 0.5,
-          });
+          map.setView([lat, lng], 15, { animate: true, duration: 0.5 });
         };
 
         window.updateHeatmap = function(heatData) {
-          console.log('🔥 Updating heatmap with', heatData.length, 'points');
-          
           try {
-            if (state.heatmapLayer) {
-              map.removeLayer(state.heatmapLayer);
-              state.heatmapLayer = null;
-            }
-
-            if (heatData.length === 0) {
-              return;
-            }
-
-            const heatmapPoints = heatData.map(point => 
-              [point.lat, point.lng, point.intensity || 1]
-            );
-
-            state.heatmapLayer = L.heatLayer(heatmapPoints, {
-              radius: 30,
-              blur: 20,
-              maxZoom: HEATMAP_ZOOM_THRESHOLD,
-              max: 1.0,
-              minOpacity: 0.4,
-              gradient: {
-                0.0: 'rgba(0, 0, 255, 0)',
-                0.2: 'rgba(0, 0, 255, 0.5)',
-                0.4: 'rgba(0, 255, 255, 0.7)',
-                0.6: 'rgba(0, 255, 0, 0.8)',
-                0.8: 'rgba(255, 255, 0, 0.9)',
-                1.0: 'rgba(255, 0, 0, 1)'
-              }
+            if (state.heatmapLayer) { map.removeLayer(state.heatmapLayer); state.heatmapLayer = null; }
+            if (heatData.length === 0) return;
+            var pts = heatData.map(function(p) { return [p.lat, p.lng, p.intensity || 1]; });
+            state.heatmapLayer = L.heatLayer(pts, {
+              radius: 30, blur: 20, maxZoom: 10, max: 1.0, minOpacity: 0.3,
+              gradient: { 0.0: 'rgba(0,0,255,0)', 0.2: 'rgba(0,0,255,0.5)', 0.4: 'rgba(0,255,255,0.7)', 0.6: 'rgba(0,255,0,0.8)', 0.8: 'rgba(255,255,0,0.9)', 1.0: 'rgba(255,0,0,1)' }
             });
-
-            console.log('✅ Heatmap layer created');
-            
-            toggleMapMode();
-          } catch (error) {
-            console.error('❌ Error updating heatmap:', error);
-          }
+            if (state.currentLevel === 'country') map.addLayer(state.heatmapLayer);
+          } catch (e) { console.error('Error updating heatmap:', e); }
         };
 
         map.whenReady(function() {
-          console.log('✅ Map ready');
-          setTimeout(notifyMapReady, 500);
+          setTimeout(function() {
+            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'mapReady' }));
+          }, 500);
         });
       </script>
     </body>
     </html>
-  `;
+    `;  // ← Close template string
+  }, []); // ← Close useMemo function with empty deps array
+
+  const getZoomIndicator = () => {
+    if (zoomLevel === 'world') {
+      return {
+        text: '🌍 World View',
+        subtext: 'Pulsing dots show where videos are live. Tap to zoom in.',
+      };
+    } else if (zoomLevel === 'country') {
+      return {
+        text: '🏙️ Region View',
+        subtext: 'Numbers show video counts. Tap a cluster to zoom in.',
+      };
+    }
+    return null;
+  };
+
+  const zoomIndicator = getZoomIndicator();
 
   return (
     <View style={styles.container}>
@@ -584,26 +578,40 @@ export default function LeafletMap({
             <Text style={styles.loadingText}>Loading map...</Text>
           </View>
         )}
-        onError={(syntheticEvent) => {
-          const { nativeEvent } = syntheticEvent;
-          console.error('WebView error:', nativeEvent);
-        }}
-        onLoadEnd={() => {
-          console.log('✅ WebView loaded');
-        }}
       />
       
-      <Pressable style={styles.locateMeButton} onPress={handleLocateMe}>
+      <Pressable 
+        style={[
+          styles.locateMeButton,
+          (!isGpsReady || locationDenied) && styles.locateMeButtonDisabled
+        ]} 
+        onPress={handleLocateMe}
+        disabled={!isGpsReady || locationDenied}
+      >
         <View style={styles.locateMeButtonInner}>
-          <Text style={styles.locateMeButtonText}>📍</Text>
-          <Text style={styles.locateMeButtonLabel}>Locate Me</Text>
+          {locationDenied ? (
+            <>
+              <Text style={styles.locateMeButtonTextDisabled}>📍</Text>
+              <Text style={styles.locateMeButtonLabelDisabled}>Location Disabled</Text>
+            </>
+          ) : !isGpsReady ? (
+            <>
+              <ActivityIndicator size="small" color={colors.textSecondary} />
+              <Text style={styles.locateMeButtonLabelDisabled}>Getting GPS...</Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.locateMeButtonText}>📍</Text>
+              <Text style={styles.locateMeButtonLabel}>Locate Me</Text>
+            </>
+          )}
         </View>
       </Pressable>
 
-      {isHeatmapMode && (
-        <View style={styles.heatmapIndicator}>
-          <Text style={styles.heatmapIndicatorText}>🔥 Heatmap View</Text>
-          <Text style={styles.heatmapIndicatorSubtext}>Zoom in to see individual videos</Text>
+      {zoomIndicator && (
+        <View style={styles.zoomIndicator}>
+          <Text style={styles.zoomIndicatorText}>{zoomIndicator.text}</Text>
+          <Text style={styles.zoomIndicatorSubtext}>{zoomIndicator.subtext}</Text>
         </View>
       )}
     </View>
@@ -611,35 +619,30 @@ export default function LeafletMap({
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    position: 'relative',
-  },
-  map: {
-    flex: 1,
-  },
+  container: { flex: 1, position: 'relative' },
+  map: { flex: 1 },
   loadingContainer: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: colors.background,
+    backgroundColor: '#F7F7F7',
   },
-  loadingText: {
-    marginTop: 12,
-    fontSize: 14,
-    color: colors.textSecondary,
-  },
+  loadingText: { marginTop: 12, fontSize: 14, color: colors.textSecondary },
   locateMeButton: {
-    position: 'absolute',
-    bottom: 100,
-    right: 20,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    elevation: 5,
+  position: 'absolute',
+  bottom: 120,  // ← Move up a bit more
+  right: 20,
+  backgroundColor: 'rgba(255, 255, 255, 0.85)',  // ← Semi-transparent
+  borderRadius: 12,
+  shadowColor: '#000',
+  shadowOffset: { width: 0, height: 2 },
+  shadowOpacity: 0.25,
+  shadowRadius: 4,
+  elevation: 5,
+},
+  locateMeButtonDisabled: {
+    backgroundColor: '#E0E0E0',
+    opacity: 0.6,
   },
   locateMeButtonInner: {
     paddingHorizontal: 16,
@@ -648,15 +651,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
   },
-  locateMeButtonText: {
-    fontSize: 24,
-  },
-  locateMeButtonLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: colors.text,
-  },
-  heatmapIndicator: {
+  locateMeButtonText: { fontSize: 24 },
+  locateMeButtonTextDisabled: { fontSize: 24, opacity: 0.4 },
+  locateMeButtonLabel: { fontSize: 16, fontWeight: '600', color: '#212121' },
+  locateMeButtonLabelDisabled: { fontSize: 14, fontWeight: '600', color: colors.textSecondary },
+  zoomIndicator: {
     position: 'absolute',
     top: 20,
     left: 20,
@@ -671,14 +670,38 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 5,
   },
-  heatmapIndicatorText: {
+  zoomIndicatorText: {
     fontSize: 16,
     fontWeight: '700',
     color: '#FFFFFF',
     marginBottom: 4,
   },
-  heatmapIndicatorSubtext: {
+  zoomIndicatorSubtext: {
     fontSize: 12,
     color: 'rgba(255, 255, 255, 0.8)',
   },
 });
+export default React.memo(
+  LeafletMap,
+  (prevProps, nextProps) => {
+    
+    const prevMarkers = prevProps.markers || [];
+    const nextMarkers = nextProps.markers || [];
+    
+    
+    if (prevMarkers.length !== nextMarkers.length) {
+      console.log('❌ Marker count changed - WILL RE-RENDER');
+      return false; // Re-render if count changed
+    }
+    
+    const prevIds = prevMarkers.map(m => m.id).sort().join(',');
+    const nextIds = nextMarkers.map(m => m.id).sort().join(',');
+    
+    if (prevIds !== nextIds) {
+      return false; // Re-render if marker IDs changed
+    }
+    
+    console.log('✅ Props are equal - PREVENTING RE-RENDER');
+    return true;
+  }
+);

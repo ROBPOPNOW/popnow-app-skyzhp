@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import {
   View,
@@ -18,6 +17,7 @@ import { supabase } from '@/lib/supabase';
 import { colors } from '@/styles/commonStyles';
 import { router, useLocalSearchParams } from 'expo-router';
 import { getVideoThumbnailUrl } from '@/utils/bunnynet';
+import { PremiumAvatar } from '@/components/PremiumAvatar';
 import VideoFeedItem from '@/components/VideoFeedItem';
 import { VideoPost } from '@/types/video';
 
@@ -27,24 +27,27 @@ const GRID_ITEM_SIZE = (SCREEN_WIDTH - 48) / 3;
 export default function UserProfileScreen() {
   const params = useLocalSearchParams();
   const userId = params.userId as string;
+  const showVisibleOnly = params.showVisibleOnly === 'true';
 
   const [isLoading, setIsLoading] = useState(true);
   const [isFollowing, setIsFollowing] = useState(false);
+  const [isBlocked, setIsBlocked] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [videoModalVisible, setVideoModalVisible] = useState(false);
   const [selectedVideoIndex, setSelectedVideoIndex] = useState(0);
 
   // Profile data
   const [profile, setProfile] = useState({
-    username: '',
-    displayName: '',
-    bio: '',
-    avatarUrl: '',
-    followersCount: 0,
-    followingCount: 0,
-    totalLikes: 0,
-    videosCount: 0,
-  });
+  username: '',
+  bio: '',
+  avatarUrl: '',
+  isPremium: false,
+  followersCount: 0,
+  followingCount: 0,
+  lifetime_videos_count: 0,
+  lifetime_likes_count: 0,
+  lifetime_views_count: 0,
+});
 
   // Videos data
   const [videos, setVideos] = useState<any[]>([]);
@@ -53,20 +56,48 @@ export default function UserProfileScreen() {
   useEffect(() => {
     loadProfile();
     checkIfFollowing();
-  }, [userId]);
+    checkIfBlocked();
+  }, [userId, showVisibleOnly]);
+
+  const handleAvatarPressInModal = (userId: string) => {
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🎯 MODAL AVATAR HANDLER CALLED');
+    console.log('  User ID:', userId);
+    console.log('  Modal visible:', videoModalVisible);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    
+    setVideoModalVisible(false);
+    console.log('✅ Modal closed');
+    
+    setTimeout(() => {
+      if (currentUserId && userId === currentUserId) {
+        console.log('➡️ Navigating to own profile tab');
+        router.replace('/(tabs)/profile');
+      } else {
+        console.log('➡️ Navigating to user profile:', userId);
+        router.push(`/user-profile?userId=${userId}`);
+      }
+    }, 100);
+  };
 
   const loadProfile = async () => {
     try {
       setIsLoading(true);
       console.log('Loading profile for user:', userId);
 
-      // Get current user
       const {
         data: { user: currentUser },
       } = await supabase.auth.getUser();
       setCurrentUserId(currentUser?.id || null);
 
-      // Load user profile
+      if (currentUser && currentUser.id === userId) {
+        console.log('👤 User tapped their own avatar - redirecting to Profile tab');
+        router.replace('/(tabs)/profile');
+        return;
+      }
+
+      console.log('🌍 Viewing other user profile:', userId);
+
       const { data: userData, error: profileError } = await supabase
         .from('users')
         .select('*')
@@ -81,39 +112,60 @@ export default function UserProfileScreen() {
       console.log('Profile loaded:', userData);
 
       setProfile({
-        username: userData.username || '',
-        displayName: userData.display_name || '',
-        bio: userData.bio || '',
-        avatarUrl: userData.avatar_url || '',
-        followersCount: userData.followers_count || 0,
-        followingCount: userData.following_count || 0,
-        totalLikes: userData.total_likes || 0,
-        videosCount: userData.videos_count || 0,
-      });
+  username: userData.username || '',
+  bio: userData.bio || '',
+  avatarUrl: userData.avatar_url || '',
+  isPremium: userData.is_premium || false,
+  followersCount: userData.followers_count || 0,
+  followingCount: userData.following_count || 0,
+  lifetime_videos_count: userData.lifetime_videos_count || 0,
+  lifetime_likes_count: userData.lifetime_likes_count || 0,
+  lifetime_views_count: userData.lifetime_views_count || 0,
+});
 
-      // Load user's videos
+      const oneHourAgo = new Date();
+      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+      const oneHourAgoISO = oneHourAgo.toISOString();
+
+      console.log('📺 Loading live videos only (within 1 hour)');
+      console.log('Cutoff time:', oneHourAgoISO);
+
       const { data: videosData, error: videosError } = await supabase
-        .from('videos')
-        .select(`
-          *,
-          users (
-            id,
-            username,
-            display_name,
-            avatar_url
-          )
-        `)
-        .eq('user_id', userId)
-        .eq('moderation_status', 'approved')
-        .order('created_at', { ascending: false });
+  .from('videos')
+  .select(`
+  *,
+  users (
+    id,
+    username,
+    avatar_url,
+    is_premium
+  )
+`)
+  .eq('user_id', userId)
+  .eq('moderation_status', 'approved')
+  .gte('created_at', oneHourAgoISO)
+  .order('created_at', { ascending: false });
 
       if (videosError) {
         console.error('Error loading videos:', videosError);
       } else {
-        console.log('Videos loaded:', videosData?.length || 0);
+        console.log('✅ Loaded', videosData?.length || 0, 'live videos');
         setVideos(videosData || []);
 
-        // Transform videos for feed
+        let likedVideoIds: string[] = [];
+        if (currentUser) {
+          const videoIds = videosData?.map(v => v.id) || [];
+          if (videoIds.length > 0) {
+            const { data: likes } = await supabase
+              .from('likes')
+              .select('video_id')
+              .eq('user_id', currentUser.id)
+              .in('video_id', videoIds);
+            
+            likedVideoIds = likes?.map(like => like.video_id) || [];
+          }
+        }
+
         const transformedVideos = (videosData || []).map((video: any) => ({
           ...video,
           videoUrl: video.video_url,
@@ -124,7 +176,7 @@ export default function UserProfileScreen() {
           comments: video.comments_count || 0,
           likes: video.likes_count || 0,
           shares: video.shares_count || 0,
-          isLiked: false,
+          isLiked: likedVideoIds.includes(video.id),
           createdAt: video.created_at,
         }));
         setVideoFeedData(transformedVideos as VideoPost[]);
@@ -158,6 +210,26 @@ export default function UserProfileScreen() {
     }
   };
 
+  const checkIfBlocked = async () => {
+    try {
+      const { data: { user: currentUser } } = await supabase.auth.getUser();
+      if (!currentUser || currentUser.id === userId) return;
+
+      const { data, error } = await supabase
+        .from('blocked_users')
+        .select('id')
+        .eq('blocker_id', currentUser.id)
+        .eq('blocked_id', userId)
+        .maybeSingle();
+
+      if (!error && data) {
+        setIsBlocked(true);
+      }
+    } catch (error) {
+      console.error('Error checking block status:', error);
+    }
+  };
+
   const handleFollowToggle = async () => {
     try {
       const {
@@ -166,7 +238,6 @@ export default function UserProfileScreen() {
       if (!currentUser) return;
 
       if (isFollowing) {
-        // Unfollow
         await supabase
           .from('follows')
           .delete()
@@ -179,7 +250,6 @@ export default function UserProfileScreen() {
           followersCount: Math.max(0, prev.followersCount - 1),
         }));
       } else {
-        // Follow
         await supabase.from('follows').insert({
           follower_id: currentUser.id,
           following_id: userId,
@@ -196,29 +266,122 @@ export default function UserProfileScreen() {
     }
   };
 
+  const handleBlockToggle = async () => {
+    try {
+      const { data: { user: currentUser } } = await supabase.auth.getUser();
+      if (!currentUser) return;
+
+      if (isBlocked) {
+        // Unblock
+        await supabase
+          .from('blocked_users')
+          .delete()
+          .eq('blocker_id', currentUser.id)
+          .eq('blocked_id', userId);
+
+        setIsBlocked(false);
+      } else {
+        // Block + auto-unfollow both directions
+        await supabase
+          .from('blocked_users')
+          .insert({ blocker_id: currentUser.id, blocked_id: userId });
+
+        // Remove follow in both directions
+        await supabase
+          .from('follows')
+          .delete()
+          .eq('follower_id', currentUser.id)
+          .eq('following_id', userId);
+
+        await supabase
+          .from('follows')
+          .delete()
+          .eq('follower_id', userId)
+          .eq('following_id', currentUser.id);
+
+        setIsBlocked(true);
+        setIsFollowing(false);
+      }
+    } catch (error) {
+      console.error('Error toggling block:', error);
+    }
+  };
+
   const handleLike = async (videoId: string) => {
+    console.log('🎯 USER PROFILE: LIKE HANDLER');
+    console.log('  Video ID:', videoId);
+    
     try {
       const {
         data: { user: currentUser },
       } = await supabase.auth.getUser();
       if (!currentUser) return;
 
-      const { data: existingLike } = await supabase
-        .from('likes')
-        .select('id')
-        .eq('video_id', videoId)
-        .eq('user_id', currentUser.id)
-        .single();
+      const video = videoFeedData.find(v => v.id === videoId);
+      if (!video) return;
 
-      if (existingLike) {
-        await supabase.from('likes').delete().eq('video_id', videoId).eq('user_id', currentUser.id);
-        await supabase.rpc('decrement_likes_count', { video_id: videoId });
+      const currentIsLiked = video.isLiked;
+
+      if (currentIsLiked) {
+        console.log('➖ Removing like...');
+        const { error } = await supabase
+          .from('likes')
+          .delete()
+          .eq('video_id', videoId)
+          .eq('user_id', currentUser.id);
+
+        if (error) {
+          console.error('❌ Error removing like:', error);
+          return;
+        }
+
+        console.log('✅ Like removed - trigger will update count');
+
+        setVideoFeedData(prevVideos => prevVideos.map(v =>
+          v.id === videoId
+            ? {
+                ...v,
+                likes: Math.max(0, v.likes - 1),
+                likes_count: Math.max(0, (v.likes_count || 0) - 1),
+                isLiked: false
+              }
+            : v
+        ));
       } else {
-        await supabase.from('likes').insert({ video_id: videoId, user_id: currentUser.id });
-        await supabase.rpc('increment_likes_count', { video_id: videoId });
+        console.log('➕ Adding like...');
+        const { error } = await supabase
+          .from('likes')
+          .insert({ video_id: videoId, user_id: currentUser.id });
+
+        if (error) {
+          if (error.code === '23505') {
+            console.log('ℹ️ Already liked (duplicate ignored)');
+            setVideoFeedData(prevVideos => prevVideos.map(v =>
+              v.id === videoId ? { ...v, isLiked: true } : v
+            ));
+            return;
+          }
+          console.error('❌ Error adding like:', error);
+          return;
+        }
+
+        console.log('✅ Like added - trigger will update count');
+
+        setVideoFeedData(prevVideos => prevVideos.map(v =>
+          v.id === videoId
+            ? {
+                ...v,
+                likes: v.likes + 1,
+                likes_count: (v.likes_count || 0) + 1,
+                isLiked: true
+              }
+            : v
+        ));
       }
+
+      console.log('✅ USER PROFILE: LIKE COMPLETE');
     } catch (error) {
-      console.error('Error liking video:', error);
+      console.error('❌ Error in handleLike:', error);
     }
   };
 
@@ -259,7 +422,7 @@ export default function UserProfileScreen() {
       <LinearGradient colors={[colors.primary, colors.secondary]} style={styles.header}>
         <View style={styles.headerTop}>
           <Pressable onPress={() => router.back()} style={styles.backButton}>
-            <IconSymbol name="chevron.left" size={24} color="#FFFFFF" />
+            <IconSymbol ios_icon_name="chevron.left" android_material_icon_name="arrow-back" size={24} color="#FFFFFF" />
           </Pressable>
           <Text style={styles.headerTitle}>@{profile.username}</Text>
           <View style={{ width: 40 }} />
@@ -267,20 +430,33 @@ export default function UserProfileScreen() {
 
         <View style={styles.profileInfo}>
           <View style={styles.avatarContainer}>
-            {profile.avatarUrl ? (
-              <Image source={{ uri: profile.avatarUrl }} style={styles.avatar} />
-            ) : (
-              <View style={styles.avatarPlaceholder}>
-                <IconSymbol name="person.fill" size={40} color="#FFFFFF" />
-              </View>
-            )}
+            <PremiumAvatar
+              avatarUrl={profile.avatarUrl}
+              size={80}
+              isPremium={profile.isPremium}
+            />
           </View>
 
           <View style={styles.statsContainer}>
+            {/* Videos */}
             <View style={styles.statItem}>
-              <Text style={styles.statValue}>{formatCount(profile.videosCount)}</Text>
+              <Text style={styles.statValue}>{formatCount(profile.lifetime_videos_count || 0)}</Text>
               <Text style={styles.statLabel}>Videos</Text>
             </View>
+            
+            {/* Views */}
+            <View style={styles.statItem}>
+              <Text style={styles.statValue}>{formatCount(profile.lifetime_views_count || 0)}</Text>
+              <Text style={styles.statLabel}>Views</Text>
+            </View>
+            
+            {/* Likes */}
+            <View style={styles.statItem}>
+              <Text style={styles.statValue}>{formatCount(profile.lifetime_likes_count || 0)}</Text>
+              <Text style={styles.statLabel}>Likes</Text>
+            </View>
+            
+            {/* Followers */}
             <Pressable 
               style={styles.statItem}
               onPress={() => router.push(`/followers-list?userId=${userId}&type=followers`)}
@@ -288,6 +464,8 @@ export default function UserProfileScreen() {
               <Text style={styles.statValue}>{formatCount(profile.followersCount)}</Text>
               <Text style={styles.statLabel}>Followers</Text>
             </Pressable>
+            
+            {/* Following */}
             <Pressable 
               style={styles.statItem}
               onPress={() => router.push(`/followers-list?userId=${userId}&type=following`)}
@@ -295,17 +473,13 @@ export default function UserProfileScreen() {
               <Text style={styles.statValue}>{formatCount(profile.followingCount)}</Text>
               <Text style={styles.statLabel}>Following</Text>
             </Pressable>
-            <View style={styles.statItem}>
-              <Text style={styles.statValue}>{formatCount(profile.totalLikes)}</Text>
-              <Text style={styles.statLabel}>Likes</Text>
-            </View>
           </View>
         </View>
 
         <View style={styles.profileDetails}>
-          <Text style={styles.displayName}>{profile.displayName || profile.username}</Text>
-          {profile.bio && <Text style={styles.bio}>{profile.bio}</Text>}
-        </View>
+  <Text style={styles.displayName}>@{profile.username}</Text>
+  {profile.bio && <Text style={styles.bio}>{profile.bio}</Text>}
+</View>
 
         {!isOwnProfile && (
           <Pressable
@@ -313,7 +487,8 @@ export default function UserProfileScreen() {
             onPress={handleFollowToggle}
           >
             <IconSymbol
-              name={isFollowing ? 'checkmark' : 'plus'}
+              ios_icon_name={isFollowing ? 'checkmark' : 'plus'}
+              android_material_icon_name={isFollowing ? 'check' : 'add'}
               size={16}
               color={isFollowing ? colors.primary : '#FFFFFF'}
             />
@@ -322,15 +497,32 @@ export default function UserProfileScreen() {
             </Text>
           </Pressable>
         )}
+
+        {!isOwnProfile && (
+          <Pressable
+            style={[styles.blockButton, isBlocked && styles.blockedButton]}
+            onPress={handleBlockToggle}
+          >
+            <IconSymbol
+              ios_icon_name={isBlocked ? 'slash.circle' : 'nosign'}
+              android_material_icon_name={isBlocked ? 'person-add' : 'block'}
+              size={16}
+              color={isBlocked ? '#FFFFFF' : '#FF3B30'}
+            />
+            <Text style={[styles.blockButtonText, isBlocked && styles.blockedButtonText]}>
+              {isBlocked ? 'Unblock' : 'Block'}
+            </Text>
+          </Pressable>
+        )}
       </LinearGradient>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         {videos.length === 0 ? (
           <View style={styles.emptyState}>
-            <IconSymbol name="video.slash" size={48} color={colors.textSecondary} />
+            <IconSymbol ios_icon_name="video.slash" android_material_icon_name="videocam-off" size={48} color={colors.textSecondary} />
             <Text style={styles.emptyStateText}>No videos yet</Text>
             <Text style={styles.emptyStateSubtext}>
-              {isOwnProfile ? 'Start creating and sharing your moments' : 'This user hasn&apos;t posted any videos yet'}
+              {isOwnProfile ? 'Start creating and sharing your moments' : 'This user has no active videos at the moment'}
             </Text>
           </View>
         ) : (
@@ -352,13 +544,13 @@ export default function UserProfileScreen() {
                   <View style={styles.gridItemOverlay}>
                     <View style={styles.gridItemStats}>
                       <View style={styles.gridItemStat}>
-                        <IconSymbol name="eye.fill" size={14} color="#FFFFFF" />
+                        <IconSymbol ios_icon_name="eye.fill" android_material_icon_name="visibility" size={14} color="#FFFFFF" />
                         <Text style={styles.gridItemStatText}>
                           {formatCount(video.views_count || 0)}
                         </Text>
                       </View>
                       <View style={styles.gridItemStat}>
-                        <IconSymbol name="heart.fill" size={14} color="#FFFFFF" />
+                        <IconSymbol ios_icon_name="heart.fill" android_material_icon_name="favorite" size={14} color="#FFFFFF" />
                         <Text style={styles.gridItemStatText}>
                           {formatCount(video.likes_count || 0)}
                         </Text>
@@ -372,7 +564,6 @@ export default function UserProfileScreen() {
         )}
       </ScrollView>
 
-      {/* Video Feed Modal */}
       {videoModalVisible && (
         <View style={styles.videoModalContainer}>
           <SafeAreaView style={styles.videoModalSafeArea} edges={['top', 'bottom']}>
@@ -380,19 +571,22 @@ export default function UserProfileScreen() {
               style={styles.closeButton}
               onPress={() => setVideoModalVisible(false)}
             >
-              <IconSymbol name="xmark.circle.fill" size={32} color="#FFFFFF" />
+              <IconSymbol ios_icon_name="xmark.circle.fill" android_material_icon_name="cancel" size={32} color="#FFFFFF" />
             </Pressable>
 
             <FlatList
               data={videoFeedData}
               renderItem={({ item, index }) => (
-                <VideoFeedItem
-                  video={item}
-                  isActive={index === selectedVideoIndex && videoModalVisible}
-                  onLike={handleLike}
-                  onViewChange={handleViewChange}
-                  userLocation={null}
-                />
+                <View style={styles.videoItemContainer}>
+                  <VideoFeedItem
+                    video={item}
+                    isActive={index === selectedVideoIndex && videoModalVisible}
+                    onLike={handleLike}
+                    onViewChange={handleViewChange}
+                    userLocation={null}
+                    onAvatarPress={handleAvatarPressInModal}
+                  />
+                </View>
               )}
               keyExtractor={(item) => item.id}
               pagingEnabled
@@ -413,7 +607,12 @@ export default function UserProfileScreen() {
               }}
               viewabilityConfig={{
                 itemVisiblePercentThreshold: 50,
+                minimumViewTime: 100,
               }}
+              removeClippedSubviews={false}
+              maxToRenderPerBatch={2}
+              windowSize={3}
+              initialNumToRender={1}
             />
           </SafeAreaView>
         </View>
@@ -452,23 +651,6 @@ const styles = StyleSheet.create({
   },
   avatarContainer: {
     marginRight: 20,
-  },
-  avatar: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    borderWidth: 3,
-    borderColor: '#FFFFFF',
-  },
-  avatarPlaceholder: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 3,
-    borderColor: '#FFFFFF',
   },
   statsContainer: {
     flex: 1,
@@ -525,6 +707,30 @@ const styles = StyleSheet.create({
   followingButtonText: {
     color: '#FFFFFF',
   },
+  blockButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 59, 48, 0.15)',
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 20,
+    gap: 8,
+    marginTop: 10,
+  },
+  blockedButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
+  },
+  blockButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#FF3B30',
+  },
+  blockedButtonText: {
+    color: '#FFFFFF',
+  },
   content: {
     flex: 1,
   },
@@ -549,7 +755,7 @@ const styles = StyleSheet.create({
     margin: 2,
     borderRadius: 8,
     overflow: 'hidden',
-    backgroundColor: colors.surface,
+    backgroundColor: colors.card,
     position: 'relative',
   },
   gridItemImage: {
@@ -595,7 +801,11 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   videoModalContainer: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: '#000000',
     zIndex: 1000,
   },
@@ -607,5 +817,9 @@ const styles = StyleSheet.create({
     top: 60,
     right: 20,
     zIndex: 1001,
+  },
+  videoItemContainer: {
+    width: SCREEN_WIDTH,
+    height: SCREEN_HEIGHT,
   },
 });

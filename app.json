@@ -2,33 +2,68 @@
   "expo": {
     "name": "POPNOW",
     "slug": "POPNOW",
-    "version": "1.0.0",
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "cbb91220-eec0-4c5c-b599-d60da21ca5b2"
+      },
+      "EXPO_PUBLIC_SUPABASE_URL": "https://spdsgmkirubngfdxxrzj.supabase.co",
+      "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNwZHNnbWtpcnVibmdmZHh4cnpqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjExMTMxNTksImV4cCI6MjA3NjY4OTE1OX0.1LzX5D49T5MU01Ew_JlY_5YXaeGlq3atHs0VIN1j7bM",
+      "EXPO_PUBLIC_BUNNY_STORAGE_ZONE_NAME": "popnow",
+      "EXPO_PUBLIC_BUNNY_STORAGE_API_KEY": "c8f17de5-d995-4d57-92385afa69b2-d83b-4a49",
+      "EXPO_PUBLIC_BUNNY_CDN_HOSTNAME": "vz-60af4a59-0b4.b-cdn.net",
+      "EXPO_PUBLIC_BUNNY_STREAM_LIBRARY_ID": "517995",
+      "EXPO_PUBLIC_BUNNY_STREAM_API_KEY": "6119e1ec-cfe0-49c4-9497f08c6350-6712-4c62",
+      "EXPO_PUBLIC_BUNNY_STREAM_CDN_HOSTNAME": "vz-60af4a59-0b4.b-cdn.net",
+      "EXPO_PUBLIC_BUNNY_PREMIUM_LIBRARY_ID": "597832",
+      "EXPO_PUBLIC_BUNNY_PREMIUM_API_KEY": "829da9c1-ed1e-411f-8413d6c54b5e-6c60-4be3",
+      "EXPO_PUBLIC_BUNNY_PREMIUM_CDN_HOSTNAME": "vz-bf878a45-f2f.b-cdn.net"
+    },
+    "version": "1.0.12",
     "orientation": "portrait",
-    "icon": "./assets/images/final_quest_240x240.png",
+    "icon": "./assets/images/icon.png",
     "scheme": "popnow",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
-      "image": "./assets/images/final_quest_240x240.png",
+      "image": "./assets/images/icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#F7F7F7"
     },
+    "notification": {
+      "icon": "./assets/images/notification-icon.png",
+      "color": "#FFB800"
+    },
     "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "com.popnow.app",
+      "supportsTablet": false,
+      "bundleIdentifier": "world.popnow.app",
+      "buildNumber": "37",
+      "icon": "./assets/images/icon.png",
+      "associatedDomains": [
+        "applinks:popnow.world"
+      ],
       "infoPlist": {
         "NSCameraUsageDescription": "POPNOW needs access to your camera to record videos.",
         "NSMicrophoneUsageDescription": "POPNOW needs access to your microphone to record audio for videos.",
         "NSPhotoLibraryUsageDescription": "POPNOW needs access to your photo library to upload videos.",
-        "NSPhotoLibraryAddUsageDescription": "POPNOW needs permission to save videos to your photo library."
+        "NSPhotoLibraryAddUsageDescription": "POPNOW needs permission to save videos to your photo library.",
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
       }
     },
     "android": {
+      "googleServicesFile": "./google-services.json",
+      "icon": "./assets/images/icon-android.png",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/final_quest_240x240.png",
-        "backgroundColor": "#F7F7F7"
+        "foregroundImage": "./assets/images/icon-android.png",
+        "backgroundColor": "#350420"
       },
-      "package": "com.popnow.app",
+      "package": "world.popnow.app",
+      "versionCode": 45,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
@@ -37,16 +72,57 @@
         "android.permission.READ_MEDIA_VIDEO",
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.READ_MEDIA_IMAGES"
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.ACCESS_MEDIA_LOCATION",
+        "android.permission.READ_MEDIA_AUDIO",
+        "NOTIFICATIONS"
+      ],
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "popnow"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        },
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "https",
+              "host": "popnow.world",
+              "pathPrefix": "/v.html"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        }
       ]
     },
     "web": {
       "bundler": "metro",
       "output": "static",
-      "favicon": "./assets/images/final_quest_240x240.png"
+      "favicon": "./assets/images/icon.png"
     },
     "plugins": [
       "expo-router",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "useFrameworks": "static"
+          }
+        }
+      ],
       [
         "expo-video",
         {
@@ -83,11 +159,26 @@
           "savePhotosPermission": "Allow POPNOW to save videos to your device.",
           "isAccessMediaLocationEnabled": true
         }
-      ]
+      ],
+      [
+        "react-native-google-mobile-ads",
+        {
+          "androidAppId": "ca-app-pub-3481504201675982~9460833565",
+          "iosAppId": "ca-app-pub-3481504201675982~4971866166"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/notification-icon.png",
+          "color": "#FFB800"
+        }
+      ],
+      "@react-native-community/datetimepicker",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
     }
-  },
-  "scheme": "POPNOW"
+  }
 }

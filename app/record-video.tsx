@@ -31,11 +31,12 @@ export default function RecordVideoScreen() {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [microphonePermission, requestMicrophonePermission] = useMicrophonePermissions();
   const cameraRef = useRef<CameraView>(null);
-  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   
   // Pinch-to-zoom state
   const baseZoomRef = useRef(0);
   const lastScaleRef = useRef(1);
+  const recordingCancelledRef = useRef(false);
 
   useEffect(() => {
     checkPermissions();
@@ -106,10 +107,11 @@ export default function RecordVideoScreen() {
     }
   };
 
-  const startRecording = async () => {
+ const startRecording = async () => {
     if (!cameraRef.current || isRecording) return;
 
     try {
+      recordingCancelledRef.current = false;
       console.log('Starting video recording...');
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
       
@@ -135,7 +137,14 @@ export default function RecordVideoScreen() {
         maxDuration: 30,
       });
 
-      if (video && video.uri) {
+     if (video && video.uri) {
+        // Check if recording was cancelled via close button
+        if (recordingCancelledRef.current) {
+          console.log('Recording cancelled, discarding video');
+          recordingCancelledRef.current = false;
+          return;
+        }
+
         console.log('Video recorded:', video.uri);
         
         // Navigate to upload screen with video
@@ -162,6 +171,13 @@ export default function RecordVideoScreen() {
 
   const stopRecording = async () => {
     if (!cameraRef.current || !isRecording) return;
+
+    // Enforce minimum 3 seconds
+    if (recordingDuration < 3) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      Alert.alert('Too Short', 'Please record at least 3 seconds');
+      return;
+    }
 
     try {
       console.log('Stopping video recording...');
@@ -220,119 +236,117 @@ export default function RecordVideoScreen() {
     );
   }
 
-  return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
-      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-        <PinchGestureHandler
-          onGestureEvent={handlePinchGesture}
-          onHandlerStateChange={handlePinchGesture}
-        >
-          <View style={{ flex: 1 }}>
-            <CameraView
-              ref={cameraRef}
-              style={styles.camera}
-              facing={facing}
-              mode="video"
-              videoQuality="1080p"
-              zoom={zoom}
-            >
-              {/* Top Bar */}
-              <View style={styles.topBar}>
-                <Pressable
-                  style={styles.closeButton}
-                  onPress={() => {
-                    if (isRecording) {
-                      Alert.alert(
-                        'Stop Recording?',
-                        'Do you want to stop recording and go back?',
-                        [
-                          { text: 'Continue Recording', style: 'cancel' },
-                          {
-                            text: 'Stop & Go Back',
-                            style: 'destructive',
-                            onPress: () => {
-                              if (isRecording) {
-                                stopRecording();
-                              }
-                              router.back();
-                            },
-                          },
-                        ]
-                      );
-                    } else {
-                      router.back();
-                    }
-                  }}
-                >
-                  <IconSymbol ios_icon_name="xmark" android_material_icon_name="close" size={28} color="#FFFFFF" />
-                </Pressable>
+return (
+  <GestureHandlerRootView style={{ flex: 1 }}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+      <PinchGestureHandler
+        onGestureEvent={handlePinchGesture}
+        onHandlerStateChange={handlePinchGesture}
+      >
+        <View style={{ flex: 1 }}>
+          {/* Camera View - NO CHILDREN */}
+          <CameraView
+            ref={cameraRef}
+            style={styles.camera}
+            facing={facing}
+            mode="video"
+            videoQuality="1080p"
+            zoom={zoom}
+          />
 
-                {isRecording && (
-                  <View style={styles.recordingIndicator}>
-                    <View style={styles.recordingDot} />
-                    <Text style={styles.recordingText}>REC</Text>
-                    <Text style={styles.durationText}>{formatDuration(recordingDuration)}</Text>
-                  </View>
-                )}
-
-                <Pressable
-                  style={[styles.switchButton, isRecording && styles.switchButtonDisabled]}
-                  onPress={toggleCameraFacing}
-                  disabled={isRecording}
-                >
-                  <IconSymbol ios_icon_name="arrow.triangle.2.circlepath.camera" android_material_icon_name="flip-camera-android" size={28} color="#FFFFFF" />
-                </Pressable>
+          {/* All UI elements now OUTSIDE camera using absolute positioning */}
+          
+         {/* REC Indicator - centered at top */}
+          <View style={styles.topBar}>
+            {isRecording && (
+              <View style={styles.recordingIndicator}>
+                <View style={styles.recordingDot} />
+                <Text style={styles.recordingText}>REC</Text>
+                <Text style={styles.durationText}>{formatDuration(recordingDuration)}</Text>
               </View>
-
-              {/* Zoom Indicator */}
-              {zoom > 0 && (
-                <View style={styles.zoomIndicator}>
-                  <IconSymbol ios_icon_name="plus.magnifyingglass" android_material_icon_name="zoom-in" size={20} color="#FFFFFF" />
-                  <Text style={styles.zoomText}>{getZoomPercentage()}</Text>
-                </View>
-              )}
-
-              {/* Pinch to Zoom Hint */}
-              {!isRecording && zoom === 0 && (
-                <View style={styles.zoomHint}>
-                  <Text style={styles.zoomHintText}>Pinch to zoom</Text>
-                </View>
-              )}
-
-              {/* Bottom Controls */}
-              <View style={styles.bottomControls}>
-                {requestDescription && (
-                  <View style={styles.requestBanner}>
-                    <IconSymbol ios_icon_name="video.badge.plus" android_material_icon_name="video-call" size={20} color="#FFFFFF" />
-                    <Text style={styles.requestText} numberOfLines={2}>
-                      {requestDescription}
-                    </Text>
-                  </View>
-                )}
-
-                <View style={styles.controlsRow}>
-                  <View style={{ width: 60 }} />
-
-                  <Pressable
-                    style={[styles.recordButton, isRecording && styles.recordButtonActive]}
-                    onPress={isRecording ? stopRecording : startRecording}
-                  >
-                    <View style={[styles.recordButtonInner, isRecording && styles.recordButtonInnerActive]} />
-                  </Pressable>
-
-                  <View style={styles.infoContainer}>
-                    <Text style={styles.infoText}>
-                      {isRecording ? `${30 - recordingDuration}s` : '30s max'}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-            </CameraView>
+            )}
           </View>
-        </PinchGestureHandler>
-      </SafeAreaView>
-    </GestureHandlerRootView>
-  );
+
+          {/* Camera Switch Button - top right */}
+          <Pressable
+            style={[styles.switchButtonAbsolute, isRecording && styles.switchButtonDisabled]}
+            onPress={toggleCameraFacing}
+            disabled={isRecording}
+          >
+            <IconSymbol ios_icon_name="arrow.triangle.2.circlepath.camera" android_material_icon_name="flip-camera-android" size={28} color="#FFFFFF" />
+          </Pressable>
+
+          {/* Zoom Indicator */}
+          {zoom > 0 && (
+            <View style={styles.zoomIndicator}>
+              <IconSymbol ios_icon_name="plus.magnifyingglass" android_material_icon_name="zoom-in" size={20} color="#FFFFFF" />
+              <Text style={styles.zoomText}>{getZoomPercentage()}</Text>
+            </View>
+          )}
+
+          {/* Pinch to Zoom Hint */}
+          {!isRecording && zoom === 0 && (
+            <View style={styles.zoomHint}>
+              <Text style={styles.zoomHintText}>Pinch to zoom</Text>
+            </View>
+          )}
+
+          {/* Bottom Controls */}
+          <View style={styles.bottomControls}>
+            {requestDescription && (
+              <View style={styles.requestBanner}>
+                <IconSymbol ios_icon_name="video.badge.plus" android_material_icon_name="video-call" size={20} color="#FFFFFF" />
+                <Text style={styles.requestText} numberOfLines={2}>
+                  {requestDescription}
+                </Text>
+              </View>
+            )}
+
+            <View style={styles.controlsRow}>
+              <Pressable
+                style={styles.closeButton}
+                onPress={() => {
+                  if (isRecording && cameraRef.current) {
+                    recordingCancelledRef.current = true;
+                    cameraRef.current.stopRecording();
+                    setIsRecording(false);
+                    if (recordingTimerRef.current) {
+                      clearInterval(recordingTimerRef.current);
+                      recordingTimerRef.current = null;
+                    }
+                  }
+                  if (router.canGoBack()) {
+                    router.back();
+                  } else {
+                    router.replace('/(tabs)/(home)');
+                  }
+                }}
+              >
+                <IconSymbol ios_icon_name="xmark" android_material_icon_name="close" size={28} color="#FFFFFF" />
+              </Pressable>
+
+              <Pressable
+                style={[styles.recordButton, isRecording && styles.recordButtonActive]}
+                onPress={isRecording ? stopRecording : startRecording}
+              >
+                <View style={[styles.recordButtonInner, isRecording && styles.recordButtonInnerActive]} />
+              </Pressable>
+
+             <View style={styles.infoContainer}>
+                <Text style={styles.infoText}>
+                  {isRecording ? `${30 - recordingDuration}s` : '30s max'}
+                </Text>
+                {!isRecording && (
+                  <Text style={styles.infoTextMin}>3s min</Text>
+                )}
+              </View>
+            </View>
+          </View>
+        </View>
+      </PinchGestureHandler>
+    </SafeAreaView>
+  </GestureHandlerRootView>
+);
 }
 
 const styles = StyleSheet.create({
@@ -400,12 +414,17 @@ const styles = StyleSheet.create({
     height: SCREEN_HEIGHT,
   },
   topBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingTop: 20,
+    paddingTop: 50,
     paddingBottom: 20,
+    zIndex: 10,
   },
   closeButton: {
     width: 44,
@@ -447,6 +466,18 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  switchButtonAbsolute: {
+    position: 'absolute',
+    top: 50,
+    right: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
   },
   switchButtonDisabled: {
     opacity: 0.5,
@@ -544,5 +575,12 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#FFFFFF',
     textAlign: 'center',
+  },
+  infoTextMin: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255, 255, 255, 0.6)',
+    textAlign: 'center',
+    marginTop: 4,
   },
 });

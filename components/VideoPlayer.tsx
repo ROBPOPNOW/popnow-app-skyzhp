@@ -1,4 +1,3 @@
-
 import React, { useEffect, useState, useRef } from 'react';
 import { View, StyleSheet, ActivityIndicator, Text, Pressable } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -8,63 +7,85 @@ import { colors } from '@/styles/commonStyles';
 interface VideoPlayerProps {
   videoUrl: string | undefined | null;
   isActive: boolean;
+  libraryId?: number; // 🆕 Which Bunny library (517995=Free, 518142=Premium)
   onLoad?: () => void;
   onError?: (error: string) => void;
 }
 
-export default function VideoPlayer({ videoUrl, isActive, onLoad, onError }: VideoPlayerProps) {
+export default function VideoPlayer({ videoUrl, isActive, libraryId, onLoad, onError }: VideoPlayerProps) {
   const [loading, setLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
   const [isTouching, setIsTouching] = useState(false);
   const isActiveRef = useRef(isActive);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Update ref when isActive changes
   useEffect(() => {
     isActiveRef.current = isActive;
   }, [isActive]);
 
-  // Generate playback URL from video GUID
+ // Generate playback URL from video GUID
   useEffect(() => {
+    if (!mountedRef.current) return;
     console.log('VideoPlayer received videoUrl:', videoUrl);
-    
-    // Validate videoUrl before processing
-    if (!videoUrl || 
-        videoUrl === '' || 
-        videoUrl === 'undefined' || 
+    console.log('VideoPlayer received libraryId:', libraryId);
+
+    if (!videoUrl ||
+        videoUrl === '' ||
+        videoUrl === 'undefined' ||
         videoUrl === 'null' ||
         typeof videoUrl !== 'string') {
       console.error('Invalid video URL:', videoUrl);
-      setHasError(true);
-      setErrorMessage('Invalid video URL');
-      setLoading(false);
-      if (onError) {
-        onError('Invalid video URL');
-      }
+      if (mountedRef.current) setHasError(true);
+      if (mountedRef.current) setErrorMessage('Invalid video URL');
+      if (mountedRef.current) setLoading(false);
+      if (onError) onError('Invalid video URL');
       return;
     }
 
-    // Generate playback URL from video GUID
-    const url = getPlaybackUrlFromVideo(videoUrl);
+    const url = getPlaybackUrlFromVideo(videoUrl, libraryId);
     if (!url) {
-      console.error('Failed to generate playback URL for:', videoUrl);
-      setHasError(true);
-      setErrorMessage('Invalid video URL');
-      setLoading(false);
-      if (onError) {
-        onError('Invalid video URL');
-      }
-      return;
+      console.log('Waiting for CDN config to load...');
+      if (mountedRef.current) setPlaybackUrl(null);
+      if (mountedRef.current) setHasError(false);
+      if (mountedRef.current) setLoading(true);
+
+      const retryTimer = setTimeout(() => {
+        if (!mountedRef.current) return;
+        const retryUrl = getPlaybackUrlFromVideo(videoUrl, libraryId);
+        if (!retryUrl) {
+          console.error('Failed to generate playback URL after retry:', videoUrl);
+          if (mountedRef.current) setHasError(true);
+          if (mountedRef.current) setErrorMessage('CDN configuration not loaded');
+          if (mountedRef.current) setLoading(false);
+          if (onError) onError('CDN configuration not loaded');
+        } else {
+          console.log('Generated playback URL after retry:', retryUrl);
+          if (mountedRef.current) setPlaybackUrl(retryUrl);
+          if (mountedRef.current) setHasError(false);
+          if (mountedRef.current) setLoading(true);
+        }
+      }, 500);
+
+      return () => clearTimeout(retryTimer);
     }
 
     console.log('Generated playback URL:', url);
-    setPlaybackUrl(url);
-    setHasError(false);
-    setLoading(true);
-  }, [videoUrl]);
+    if (mountedRef.current) setPlaybackUrl(url);
+    if (mountedRef.current) setHasError(false);
+    if (mountedRef.current) setLoading(true);
+  }, [videoUrl, libraryId]);
 
-  const getPlaybackUrlFromVideo = (url: string | undefined | null): string | null => {
+  const getPlaybackUrlFromVideo = (url: string | undefined | null, libId?: number): string | null => {
     // Validate input
     if (!url || 
         typeof url !== 'string' || 
@@ -83,13 +104,16 @@ export default function VideoPlayer({ videoUrl, isActive, onLoad, onError }: Vid
     
     // Otherwise, treat it as a video GUID and generate the playback URL
     console.log('Treating as video GUID, generating playback URL for:', url);
-    const playbackUrl = getVideoPlaybackUrl(url);
+    console.log('Using library ID:', libId || 'default (Free)');
+    
+    const playbackUrl = getVideoPlaybackUrl(url, libId);
     if (!playbackUrl) {
       console.error('Failed to generate playback URL from GUID:', url);
       return null;
     }
     
-    console.log('Generated playback URL:', playbackUrl);
+    console.log('🎬 Generated playback URL:', playbackUrl);
+    console.log('  - Library:', libId === 518142 ? 'Premium' : 'Free');
     return playbackUrl;
   };
 
@@ -102,11 +126,10 @@ export default function VideoPlayer({ videoUrl, isActive, onLoad, onError }: Vid
     }
   });
 
-  // Control playback based on isActive prop
+ // Control playback based on isActive prop
   useEffect(() => {
-    if (!playbackUrl || hasError || !player) {
-      return;
-    }
+    if (!playbackUrl || hasError || !player) return;
+    if (!mountedRef.current) return;
 
     console.log('isActive changed:', isActive, 'for video:', videoUrl);
 
@@ -136,9 +159,9 @@ export default function VideoPlayer({ videoUrl, isActive, onLoad, onError }: Vid
     }
   }, [isActive, playbackUrl, hasError, player, videoUrl]);
 
-  // NEW: Handle touch-and-hold for 2x speed
+ // Handle touch-and-hold for 2x speed
   useEffect(() => {
-    if (!player || !isActive) return;
+    if (!player || !isActive || !mountedRef.current) return;
 
     if (isTouching) {
       // Speed up to 2x when touching
@@ -203,7 +226,7 @@ export default function VideoPlayer({ videoUrl, isActive, onLoad, onError }: Vid
     
     // Force reload by updating the playback URL
     if (videoUrl) {
-      const url = getPlaybackUrlFromVideo(videoUrl);
+      const url = getPlaybackUrlFromVideo(videoUrl, libraryId);
       if (url) {
         setPlaybackUrl(url + `?retry=${Date.now()}`);
       }
@@ -229,18 +252,15 @@ export default function VideoPlayer({ videoUrl, isActive, onLoad, onError }: Vid
   }
 
   if (!playbackUrl) {
-    return (
-      <View style={styles.container}>
-        <View style={styles.errorContainer}>
-          <Text style={styles.errorText}>❌</Text>
-          <Text style={styles.errorMessage}>Invalid video URL</Text>
-          <Text style={styles.errorDetails}>
-            CDN hostname not configured
-          </Text>
-        </View>
+  return (
+    <View style={styles.container}>
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#FFFFFF" />
+        <Text style={styles.loadingText}>Preparing video...</Text>
       </View>
-    );
-  }
+    </View>
+  );
+}
 
   if (hasError) {
     return (

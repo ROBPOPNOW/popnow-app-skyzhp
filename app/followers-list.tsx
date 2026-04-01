@@ -15,14 +15,15 @@ import { IconSymbol } from '@/components/IconSymbol';
 import { supabase } from '@/lib/supabase';
 import { colors } from '@/styles/commonStyles';
 import { router, useLocalSearchParams } from 'expo-router';
+import { PremiumAvatar } from '@/components/PremiumAvatar';
 
 type ListType = 'followers' | 'following';
 
 interface UserItem {
   id: string;
   username: string;
-  display_name?: string;
   avatar_url?: string;
+  is_premium?: boolean;
   isFollowing?: boolean;
 }
 
@@ -100,14 +101,14 @@ export default function FollowersListScreen() {
         const { data, error } = await supabase
           .from('follows')
           .select(`
-            follower_id,
-            users!follows_follower_id_fkey (
-              id,
-              username,
-              display_name,
-              avatar_url
-            )
-          `)
+  follower_id,
+  users!follows_follower_id_fkey (
+    id,
+    username,
+    avatar_url,
+    is_premium
+  )
+`)
           .eq('following_id', userId);
 
         if (error) {
@@ -141,14 +142,14 @@ export default function FollowersListScreen() {
         const { data, error } = await supabase
           .from('follows')
           .select(`
-            following_id,
-            users!follows_following_id_fkey (
-              id,
-              username,
-              display_name,
-              avatar_url
-            )
-          `)
+  following_id,
+  users!follows_following_id_fkey (
+    id,
+    username,
+    avatar_url,
+    is_premium
+  )
+`)
           .eq('follower_id', userId);
 
         if (error) {
@@ -255,46 +256,41 @@ export default function FollowersListScreen() {
         onPress={() => handleUserPress(item.id)}
       >
         <View style={styles.userInfo}>
-          <View style={styles.avatarContainer}>
-            {item.avatar_url ? (
-              <Image source={{ uri: item.avatar_url }} style={styles.avatar} />
-            ) : (
-              <View style={styles.avatarPlaceholder}>
-                <IconSymbol name="person.fill" size={24} color={colors.textSecondary} />
-              </View>
-            )}
-          </View>
+          <PremiumAvatar
+  avatarUrl={item.avatar_url || null}
+  size={48}
+  isPremium={item.is_premium || false}
+/>
           <View style={styles.userDetails}>
             <Text style={styles.displayName}>
-              {item.display_name || item.username}
-            </Text>
-            <Text style={styles.username}>@{item.username}</Text>
+  @{item.username}
+</Text>
           </View>
         </View>
 
         {!isOwnProfile && (
-          <Pressable
-            style={[
-              styles.followButton,
-              item.isFollowing && styles.followingButton,
-            ]}
-            onPress={() => handleFollowToggle(item.id)}
-          >
-            <IconSymbol 
-              name={item.isFollowing ? "checkmark" : "plus"} 
-              size={16} 
-              color={item.isFollowing ? colors.text : "#FFFFFF"} 
-            />
-            <Text
-              style={[
-                styles.followButtonText,
-                item.isFollowing && styles.followingButtonText,
-              ]}
-            >
-              {item.isFollowing ? 'Following' : 'Follow'}
-            </Text>
-          </Pressable>
-        )}
+  <Pressable
+    style={[
+      styles.followButton,
+      item.isFollowing && styles.followingButton,
+    ]}
+    onPress={() => handleFollowToggle(item.id)}
+  >
+    <IconSymbol 
+      name={item.isFollowing ? "checkmark" : "plus"} 
+      size={16} 
+      color={item.isFollowing ? "#333333" : "#000000"}  // ✅ Black for both
+    />
+    <Text
+      style={[
+        styles.followButtonText,
+        item.isFollowing && styles.followingButtonText,
+      ]}
+    >
+      {item.isFollowing ? 'Following' : 'Follow'}
+    </Text>
+  </Pressable>
+)}
       </Pressable>
     );
   };
@@ -395,7 +391,6 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
   },
-  // NEW: Improved toggle switch styles
   toggleContainer: {
     flexDirection: 'row',
     backgroundColor: colors.surface,
@@ -462,22 +457,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flex: 1,
   },
-  avatarContainer: {
-    marginRight: 12,
-  },
-  avatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-  },
-  avatarPlaceholder: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: colors.border,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
   userDetails: {
     flex: 1,
   },
@@ -491,7 +470,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: colors.textSecondary,
   },
-  // NEW: Improved follow button with icon
   followButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -507,11 +485,11 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   followButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#FFFFFF',
-  },
+  fontSize: 14,
+  fontWeight: '600',
+  color: '#000000',  // ✅ BLACK text for "Follow" button
+},
   followingButtonText: {
-    color: colors.text,
+    color: '#333333',  // ✅ Dark text for white "Following" button
   },
 });

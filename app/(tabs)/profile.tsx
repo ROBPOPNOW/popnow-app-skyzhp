@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import { Video, ResizeMode } from 'expo-av';
@@ -17,6 +17,14 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { GestureHandlerRootView, Swipeable, PanGestureHandler, State } from 'react-native-gesture-handler';
 import * as Location from 'expo-location';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import CoinAnimation from '@/components/CoinAnimation';
+// Add these imports
+import CoinBalance from '@/components/CoinBalance';
+import DailyBonusPopup from '@/components/DailyBonusPopup';
+import { useCoinBalance } from '@/hooks/useCoinBalance';
+import { checkAndAwardDailyBonus } from '@/utils/coins';
+import { useFocusEffect } from 'expo-router';
+import { PremiumAvatar } from '@/components/PremiumAvatar';
 import {
   View,
   Text,
@@ -35,25 +43,66 @@ import {
   Animated,
 } from 'react-native';
 
-type ProfileTab = 'videos' | 'pending' | 'liked' | 'requests' | 'notifications';
+// Helper function to check video validity and navigate
+const navigateToVideoOrProfile = async (videoId: string, actorId: string | undefined, router: any) => {
+  console.log('🔍 navigateToVideoOrProfile called with:', { videoId, actorId });
+  
+  try {
+    console.log('🔍 Checking video validity in database...');
+    const { data: video, error } = await supabase
+      .from('videos')
+      .select('created_at, moderation_status, user_id')
+      .eq('id', videoId)
+      .single();
+    
+    console.log('📊 Video check result:', { video, error });
+    
+    if (error || !video) {
+      console.log('❌ Video not found, navigating to profile');
+      if (actorId) {
+        router.push({
+          pathname: '/user-profile',
+          params: { userId: actorId },
+        });
+      }
+      return;
+    }
+    
+    const videoAge = Date.now() - new Date(video.created_at).getTime();
+    const oneHourInMs = 60 * 60 * 1000;
+    const isExpired = videoAge > oneHourInMs;
+    const isRejected = video.moderation_status === 'rejected';
+    
+    console.log('📊 Video age check:', { videoAge, oneHourInMs, isExpired, isRejected });
+    
+    if (isExpired || isRejected) {
+      console.log(`❌ Video ${isExpired ? 'expired' : 'rejected'}, navigating to profile`);
+      router.push({
+        pathname: '/user-profile',
+        params: { userId: video.user_id },
+      });
+    } else {
+      console.log('✅ Video is valid, navigating to player');
+      router.push({
+        pathname: '/search-video-player',
+        params: { 
+          videoIds: JSON.stringify([videoId]),
+          startIndex: '0'
+        },
+      });
+    }
+  } catch (err) {
+    console.error('❌ Error checking video validity:', err);
+    if (actorId) {
+      router.push({
+        pathname: '/user-profile',
+        params: { userId: actorId },
+      });
+    }
+  }
+};
 
-const AVAILABLE_CATEGORIES = [
-  'Food & Dining',
-  'Entertainment',
-  'Sports',
-  'Travel',
-  'Fashion',
-  'Technology',
-  'Art & Culture',
-  'Music',
-  'Fitness',
-  'Nature',
-  'Pets',
-  'Gaming',
-  'Education',
-  'Business',
-  'Lifestyle',
-];
+type ProfileTab = 'videos' | 'pending' | 'liked' | 'requests' | 'notifications';
 
 const { width } = Dimensions.get('window');
 const CARD_WIDTH = (width - 48) / 3;
@@ -64,6 +113,10 @@ export default function ProfileScreen() {
   const [profile, setProfile] = useState<any>(null);
   const [videos, setVideos] = useState<VideoPost[]>([]);
   const [likedVideos, setLikedVideos] = useState<VideoPost[]>([]);
+  const [videosPage, setVideosPage] = useState(0);
+const [hasMoreVideos, setHasMoreVideos] = useState(true);
+const [loadingMoreVideos, setLoadingMoreVideos] = useState(false);
+const VIDEOS_PAGE_SIZE = 5;
   const [myRequests, setMyRequests] = useState<any[]>([]);
   const [notifications, setNotifications] = useState<any[]>([]);
   const [pendingUploads, setPendingUploads] = useState<any[]>([]);
@@ -78,27 +131,69 @@ export default function ProfileScreen() {
   const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0);
   const [isSelectMode, setIsSelectMode] = useState(false);
   const [selectedVideoIds, setSelectedVideoIds] = useState<Set<string>>(new Set());
-  const router = useRouter();
+  // 🪙 COIN STATE
+const [showDailyBonus, setShowDailyBonus] = useState(false);
+const [showCoinAnimation, setShowCoinAnimation] = useState(false);
+const [coinAnimationAmount, setCoinAnimationAmount] = useState(0);
+// Get user ID from auth (available immediately)
+const [userId, setUserId] = useState<string | null>(null);
+const { coins, loading: coinsLoading, refetch: refetchCoins } = useCoinBalance(userId);
+const prevCoinsRef = useRef(coins); // ← Move AFTER coins is declared
+const router = useRouter();
   const swipeableRefs = useRef<{ [key: string]: Swipeable | null }>({});
-  const requestTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const expiryTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const requestTimerRef = useRef<number | null>(null);
+  const expiryTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
 
+// 🔧 FIX: Reload requests when returning to profile
+useFocusEffect(
+  useCallback(() => {
+    console.log('🔄 Profile screen focused - checking if refresh needed');
+    
+    // 🆕 ALWAYS reload profile (including premium status) when screen is focused
+    loadProfile();
+    reloadProfileCounts();
+    
+    // Always reload requests when focusing on this screen
+    if (activeTab === 'requests') {
+      console.log('📋 Reloading requests...');
+      loadMyRequests();
+    }
+    
+    // Also reload if coming from winner selection
+    if (params.refresh || params.reload) {
+      console.log('🔄 Refresh param detected - reloading requests');
+      loadMyRequests();
+    }
+  }, [activeTab, params.refresh, params.reload])
+);
   useEffect(() => {
     if (params.tab) {
       setActiveTab(params.tab as ProfileTab);
     }
   }, [params.tab]);
 
-  useEffect(() => {
-    loadProfile();
-    loadUserLocation();
-    loadUnreadNotificationsCount();
-  }, []);
+useEffect(() => {
+  mountedRef.current = true;
+  loadProfile();
+  loadUserLocation();
+  loadUnreadNotificationsCount();
+  checkDailyBonus();
+  return () => {
+    mountedRef.current = false;
+    if (expiryTimerRef.current) {
+      clearInterval(expiryTimerRef.current);
+    }
+    if (requestTimerRef.current) {
+      clearInterval(requestTimerRef.current);
+    }
+  };
+}, []);
 
   useEffect(() => {
-    if (activeTab === 'videos') {
-      loadVideos();
-    } else if (activeTab === 'liked') {
+  if (activeTab === 'videos') {
+    loadVideos(0, false); // Load page 0
+  } else if (activeTab === 'liked') {
       loadLikedVideos();
     } else if (activeTab === 'requests') {
       loadMyRequests();
@@ -109,6 +204,156 @@ export default function ProfileScreen() {
     }
   }, [activeTab]);
 
+// Add this AFTER your existing useEffect blocks (around line 115)
+useEffect(() => {
+  if (params.refresh === 'true' || params.reload === 'true') {
+    console.log('🔄 Refresh triggered from navigation - reloading requests');
+    loadMyRequests();
+  }
+}, [params.refresh, params.reload]);
+
+// Auto-refresh pending uploads every 5 seconds (background)
+useEffect(() => {
+  if (activeTab !== 'pending') return;
+
+  console.log('🔄 Setting up background auto-refresh for Pending tab');
+  let mounted = true;
+
+  loadPendingUploads();
+
+  const interval = setInterval(async () => {
+    if (!mounted) return;
+    const hasPendingUploads = await loadPendingUploadsInBackground();
+    if (!mounted) return;
+    if (!hasPendingUploads) {
+      console.log('✅ No pending uploads, stopping auto-refresh');
+      clearInterval(interval);
+    }
+  }, 5000);
+
+  return () => {
+    mounted = false;
+    console.log('🛑 Stopping auto-refresh');
+    clearInterval(interval);
+  };
+}, [activeTab]);
+
+  // Clean up pending uploads when videos are approved or rejected
+useEffect(() => {
+  if (activeTab !== 'pending' && activeTab !== 'videos') return;
+  let mounted = true;
+
+  const cleanupPendingUploads = async () => {
+    if (!mounted) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user || !mounted) return;
+
+      const { data: pendingUploads } = await supabase
+        .from('pending_uploads')
+        .select('id, caption')
+        .eq('user_id', user.id)
+        .eq('status', 'moderating');
+
+      if (!pendingUploads || pendingUploads.length === 0) return;
+
+      for (const pending of pendingUploads) {
+        if (!mounted) return;
+        const { data: video } = await supabase
+          .from('videos')
+          .select('id, moderation_status, caption')
+          .eq('user_id', user.id)
+          .eq('caption', pending.caption)
+          .single();
+
+        if (video) {
+          if (video.moderation_status === 'approved' || video.moderation_status === 'rejected') {
+            await supabase
+              .from('pending_uploads')
+              .delete()
+              .eq('id', pending.id);
+            console.log('🧹 Cleaned up pending upload:', pending.id);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error cleaning up pending uploads:', error);
+    }
+  };
+
+  const interval = setInterval(cleanupPendingUploads, 5000);
+  return () => {
+    mounted = false;
+    clearInterval(interval);
+  };
+}, [activeTab]);
+
+// 🎬 Trigger animation when coins change
+useEffect(() => {
+  if (prevCoinsRef.current !== 0 && coins !== 0) {
+    const coinDifference = coins - prevCoinsRef.current;
+    
+    if (coinDifference !== 0) {
+      console.log('🎬 Coin animation triggered:', coinDifference);
+      setCoinAnimationAmount(coinDifference);
+      setShowCoinAnimation(true);
+      setTimeout(() => setShowCoinAnimation(false), 1100);
+    }
+  }
+  
+  prevCoinsRef.current = coins;
+}, [coins]);
+
+useEffect(() => {
+  if (activeTab !== 'pending') return;
+
+  console.log('🔔 Setting up real-time listener for pending videos...');
+  let mounted = true;
+  let subscription: any = null;
+
+  const setupListener = async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user || !mounted) return;
+
+    subscription = supabase
+      .channel('pending-videos-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'videos',
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          if (!mounted) return;
+          console.log('🔄 Video status updated:', payload);
+          const updatedVideo = payload.new;
+          loadPendingUploads();
+          if (updatedVideo.moderation_status === 'rejected') {
+            Alert.alert(
+              '❌ Video Rejected',
+              'Your video was rejected due to inappropriate content and has been deleted.',
+              [{ text: 'OK' }]
+            );
+          }
+        }
+      )
+      .subscribe();
+
+    console.log('✅ Real-time listener active');
+  };
+
+  setupListener();
+
+  return () => {
+    mounted = false;
+    console.log('🔕 Removing real-time listener');
+    if (subscription) {
+      subscription.unsubscribe();
+    }
+  };
+}, [activeTab]);
   const loadUserLocation = async () => {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -142,41 +387,93 @@ export default function ProfileScreen() {
     }
   };
 
-  const loadPendingUploads = async () => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+const loadPendingUploads = async () => {
+  try {
+    setLoading(true);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
 
-      const { data, error } = await supabase
-        .from('pending_uploads')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+    // Get pending uploads from pending_uploads table
+    // These show upload progress and moderation status
+    const { data, error } = await supabase
+      .from('pending_uploads')
+      .select('*')
+      .eq('user_id', user.id)
+      .in('status', ['uploading', 'processing', 'moderating'])
+      .order('created_at', { ascending: false });
 
-      if (error) throw error;
-      setPendingUploads(data || []);
-      
-      // Check for rejected videos
-      checkForRejectedVideos();
-    } catch (error) {
-      console.error('Error loading pending uploads:', error);
-    } finally {
-      setLoading(false);
+    if (error) throw error;
+    
+    console.log(`📋 Loaded ${data?.length || 0} pending uploads`);
+    setPendingUploads(data || []);
+    
+  } catch (error) {
+    console.error('Error loading pending uploads:', error);
+  } finally {
+    setLoading(false);
+  }
+};
+
+// Background refresh without loading indicator
+const loadPendingUploadsInBackground = async () => {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    // Fetch without showing loading state
+    const { data, error } = await supabase
+      .from('pending_uploads')
+      .select('*')
+      .eq('user_id', user.id)
+      .in('status', ['uploading', 'processing', 'moderating'])
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Background refresh error:', error);
+      return false; // Return false if error
     }
-  };
 
+    // Update state
+    setPendingUploads(data || []);
+    
+    // Return true if there are pending uploads, false if empty
+    return (data && data.length > 0);
+    
+  } catch (error) {
+    console.error('Background refresh error:', error);
+    return false;
+  }
+};
+// 🪙 CHECK AND AWARD DAILY BONUS
+const checkDailyBonus = async () => {
+  try {
+    const { data: { user: authUser } } = await supabase.auth.getUser();
+    if (!authUser) return;
+
+    const coinsAwarded = await checkAndAwardDailyBonus(authUser.id);
+    
+    if (coinsAwarded > 0) {
+      // Show daily bonus popup
+      setShowDailyBonus(true);
+      // Refetch coin balance to show updated amount
+      refetchCoins();
+    }
+  } catch (error) {
+    console.error('Error checking daily bonus:', error);
+  }
+};
   const checkForRejectedVideos = async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
       const { data: rejectedVideos, error } = await supabase
-        .from('videos')
-        .select('id, caption, moderation_status')
-        .eq('user_id', user.id)
-        .eq('moderation_status', 'rejected')
-        .order('created_at', { ascending: false })
-        .limit(1);
+  .from('videos')
+  .select('id, caption, moderation_status, video_url, library_id')
+  .eq('user_id', user.id)
+  .eq('moderation_status', 'rejected')
+  .order('created_at', { ascending: false })
+  .limit(1);
 
       if (error) throw error;
 
@@ -188,6 +485,19 @@ export default function ProfileScreen() {
           [{ text: 'OK' }]
         );
 
+        if (rejectedVideo.video_url) {
+  const bunnyVideoId = extractVideoId(rejectedVideo.video_url);
+  if (bunnyVideoId) {
+    try {
+      const isPremium = rejectedVideo.library_id === 597832;
+      await deleteStreamVideo(bunnyVideoId, isPremium);
+      console.log('✅ Rejected video deleted from Bunny.net');
+    } catch (deleteError) {
+      console.error('❌ Error deleting rejected video from Bunny.net:', deleteError);
+    }
+  }
+}
+
         await supabase
           .from('videos')
           .delete()
@@ -198,246 +508,425 @@ export default function ProfileScreen() {
     }
   };
 
-  const loadVideos = async () => {
-    try {
+const loadVideos = async (pageNum: number = 0, isLoadingMore: boolean = false) => {
+  try {
+    // Prevent duplicate loading
+    if (isLoadingMore && loadingMoreVideos) return;
+    if (isLoadingMore && !hasMoreVideos) return;
+
+    if (isLoadingMore) {
+      setLoadingMoreVideos(true);
+    } else {
       setLoading(true);
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        console.log('No user found in loadVideos');
-        setVideos([]);
-        return;
-      }
+      setVideosPage(0);
+      setHasMoreVideos(true);
+    }
 
-      console.log('=== LOADING VIDEOS ===');
-      console.log('User ID:', user.id);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      console.log('No user found in loadVideos');
+      setVideos([]);
+      return;
+    }
 
-      // Calculate 3 days ago timestamp to filter out expired videos
-      const threeDaysAgo = new Date();
-      threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-      const cutoffDate = threeDaysAgo.toISOString();
+    console.log(`📄 Loading videos page ${pageNum} (${VIDEOS_PAGE_SIZE} videos)...`);
 
-      console.log('📅 Filtering videos created after:', cutoffDate);
+    const threeDaysAgo = new Date();
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+    const cutoffDate = threeDaysAgo.toISOString();
 
-      const { data, error } = await supabase
+    // Calculate offset
+    const offset = pageNum * VIDEOS_PAGE_SIZE;
+
+    // 🚀 PARALLEL QUERIES - fetch video data and likes simultaneously
+    const [videosResult, likesResult] = await Promise.all([
+      supabase
         .from('videos')
         .select(`
-          *,
+          id,
+          video_url,
+          caption,
+          tags,
+          library_id,
+          location_latitude,
+          location_longitude,
+          location_name,
+          location_privacy,
+          created_at,
+          expires_at,
+          likes_count,
+          comments_count,
+          shares_count,
+          views_count,
+          moderation_status,
+          thumbnail_url,
           users (
             id,
             username,
-            avatar_url
+            avatar_url,
+            is_premium
           )
         `)
         .eq('user_id', user.id)
-        .eq('is_approved', true)
-        .gte('created_at', cutoffDate) // Only show videos less than 3 days old
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        console.error('❌ Error loading videos from database:', error);
-        throw error;
-      }
-
-      console.log('✅ Raw video data from database:', data?.length || 0, 'videos');
-
-      // Add extensive null/undefined checks before processing video data
-      const videosWithLikes = await Promise.all(
-        (data || []).map(async (video) => {
-          try {
-            // CRITICAL: Check if video object exists and has required fields
-            if (!video) {
-              console.warn('⚠️ Null video object encountered');
-              return null;
-            }
-            
-            if (!video.id) {
-              console.warn('⚠️ Video missing ID:', video);
-              return null;
-            }
-
-            if (!video.video_url) {
-              console.warn('⚠️ Video missing video_url:', video.id);
-              return null;
-            }
-
-            console.log('Processing video:', video.id);
-
-            const { data: likeData } = await supabase
-              .from('likes')
-              .select('id')
-              .eq('video_id', video.id)
-              .eq('user_id', user.id)
-              .single();
-
-            // Safely parse tags with extensive error handling
-            let parsedTags = [];
-            if (video.tags !== null && video.tags !== undefined) {
-              if (typeof video.tags === 'string') {
-                try {
-                  // Only parse if it's a non-empty string
-                  if (video.tags.trim().length > 0) {
-                    parsedTags = JSON.parse(video.tags);
-                    console.log('✅ Parsed tags for video', video.id, ':', parsedTags);
-                  }
-                } catch (parseError) {
-                  console.warn('⚠️ Failed to parse tags for video', video.id, ':', parseError);
-                  console.warn('Tags value:', video.tags);
-                  parsedTags = [];
-                }
-              } else if (Array.isArray(video.tags)) {
-                parsedTags = video.tags;
-                console.log('✅ Tags already array for video', video.id);
-              } else {
-                console.warn('⚠️ Unexpected tags type for video', video.id, ':', typeof video.tags);
-              }
-            }
-
-            return {
-              ...video,
-              tags: parsedTags,
-              isLiked: !!likeData,
-              // Ensure all required fields have safe defaults
-              likes_count: video.likes_count || 0,
-              comments_count: video.comments_count || 0,
-              shares_count: video.shares_count || 0,
-              caption: video.caption || '',
-              created_at: video.created_at || new Date().toISOString(),
-            };
-          } catch (videoError) {
-            console.error('❌ Error processing video:', video?.id, videoError);
-            return null;
-          }
-        })
-      );
-
-      // Filter out null values from failed video processing
-      const validVideos = videosWithLikes.filter(v => v !== null);
-      console.log('✅ Processed videos count:', validVideos.length);
-      console.log('=== LOADING VIDEOS COMPLETE ===');
-
-      setVideos(validVideos);
+        .gte('created_at', cutoffDate)
+        .order('created_at', { ascending: false })
+        .range(offset, offset + VIDEOS_PAGE_SIZE - 1),
       
-      // Start updating expiry timers
-      updateVideoExpiryTimers();
-    } catch (error) {
-      console.error('❌ Error in loadVideos:', error);
-      Alert.alert('Error', 'Failed to load videos. Please try again.');
-      setVideos([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const updateVideoExpiryTimers = () => {
-    // Clear existing timer
-    if (expiryTimerRef.current) {
-      clearInterval(expiryTimerRef.current);
-    }
-
-    // Update every minute
-    expiryTimerRef.current = setInterval(() => {
-      setVideos(prevVideos => [...prevVideos]);
-    }, 60000);
-  };
-
-  const loadLikedVideos = async () => {
-    try {
-      setLoading(true);
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const { data, error } = await supabase
+      // Pre-fetch likes for this user
+      supabase
         .from('likes')
-        .select(`
-          video_id,
-          videos (
-            *,
-            users (
-              id,
-              username,
-              avatar_url
-            )
-          )
-        `)
+        .select('video_id')
         .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+    ]);
 
-      if (error) throw error;
+    if (videosResult.error) {
+      console.error('❌ Error loading videos:', videosResult.error);
+      throw videosResult.error;
+    }
 
-      const likedVideosData = (data || [])
-        .filter(like => like.videos)
-        .map(like => ({
-          ...(like.videos as any),
+    const data = videosResult.data;
+
+    // Check if we got fewer videos than requested (no more videos)
+    if (!data || data.length < VIDEOS_PAGE_SIZE) {
+      setHasMoreVideos(false);
+      console.log('📭 No more videos available');
+    }
+
+    if (!data || data.length === 0) {
+      if (!isLoadingMore) {
+        console.log('ℹ️ No videos found');
+        setVideos([]);
+      }
+      return;
+    }
+
+    // 🚀 Use Set for O(1) lookup
+    const likedVideoIds = new Set(
+      (likesResult.data || [])
+        .map(like => like.video_id)
+        .filter(id => data.some(v => v.id === id))
+    );
+
+    // 🚀 OPTIMIZED: Process all videos in a single pass
+    const processedVideos = data
+      .filter(video => video?.id && video?.video_url)
+      .map(video => {
+        let parsedTags = [];
+        if (video.tags) {
+          if (typeof video.tags === 'string') {
+            try {
+              parsedTags = video.tags.trim() ? JSON.parse(video.tags) : [];
+            } catch {
+              parsedTags = [];
+            }
+          } else if (Array.isArray(video.tags)) {
+            parsedTags = video.tags;
+          }
+        }
+
+        return {
+          ...video,
+          tags: parsedTags,
+          isLiked: likedVideoIds.has(video.id),
+          likes_count: video.likes_count || 0,
+          comments_count: video.comments_count || 0,
+          shares_count: video.shares_count || 0,
+          caption: video.caption || '',
+          created_at: video.created_at || new Date().toISOString(),
+          createdAt: video.created_at || new Date().toISOString(),
+        };
+      });
+
+    console.log(`✅ Loaded ${processedVideos.length} videos for page ${pageNum}`);
+
+    // Append or replace videos
+    if (pageNum === 0) {
+      setVideos(processedVideos);
+    } else {
+      setVideos(prev => [...prev, ...processedVideos]);
+    }
+
+    updateVideoExpiryTimers();
+  } catch (error) {
+    console.error('❌ Error in loadVideos:', error);
+    Alert.alert('Error', 'Failed to load videos. Please try again.');
+    if (!isLoadingMore) {
+      setVideos([]);
+    }
+  } finally {
+    if (isLoadingMore) {
+      setLoadingMoreVideos(false);
+    } else {
+      setLoading(false);
+    }
+  }
+};
+
+const handleLoadMoreVideos = () => {
+  if (!loadingMoreVideos && hasMoreVideos) {
+    const nextPage = videosPage + 1;
+    setVideosPage(nextPage);
+    loadVideos(nextPage, true);
+  }
+};
+
+const updateVideoExpiryTimers = () => {
+  if (expiryTimerRef.current) {
+    clearInterval(expiryTimerRef.current);
+  }
+  expiryTimerRef.current = setInterval(() => {
+    if (!mountedRef.current) return;
+    setVideos(prevVideos => [...prevVideos]);
+  }, 60000);
+};
+
+const loadLikedVideos = async () => {
+  try {
+    setLoading(true);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      console.log('No user found in loadLikedVideos');
+      setLikedVideos([]);
+      return;
+    }
+
+    console.log('=== LOADING LIKED VIDEOS ===');
+    console.log('User ID:', user.id);
+
+    // 🚨 CRITICAL: Fresh query for likes (no cache)
+    const { data: likesData, error: likesError } = await supabase
+      .from('likes')
+      .select('video_id, created_at')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    if (likesError) {
+      console.error('❌ Error loading likes:', likesError);
+      throw likesError;
+    }
+
+    console.log('✅ User has liked', likesData?.length || 0, 'videos');
+
+    if (!likesData || likesData.length === 0) {
+      console.log('ℹ️ No liked videos found');
+      setLikedVideos([]);
+      return;
+    }
+
+    // Get video IDs
+    const videoIds = likesData.map(like => like.video_id);
+    console.log('📹 Loading details for', videoIds.length, 'videos');
+
+    // 🚨 CRITICAL: Fresh query for video details (no cache)
+    const { data: videosData, error: videosError } = await supabase
+  .from('videos')
+  .select(`
+  id,
+  video_url,
+  caption,
+  tags,
+  library_id,
+  location_latitude,
+  location_longitude,
+  location_name,
+  location_privacy,
+  created_at,
+  expires_at,
+  likes_count,
+  comments_count,
+  shares_count,
+  views_count,
+  moderation_status,
+  thumbnail_url,
+  users (
+    id,
+    username,
+    avatar_url,
+    is_premium
+  )
+`)
+  .in('id', videoIds);
+
+    if (videosError) {
+      console.error('❌ Error loading video details:', videosError);
+      throw videosError;
+    }
+
+    console.log('✅ Loaded', videosData?.length || 0, 'video details');
+
+    // Process videos
+    const processedVideos = (videosData || [])
+      .filter(video => video && video.id && video.video_url)
+      .map(video => {
+        console.log('📹 Processing liked video:', video.id);
+        console.log('  📊 Counts:');
+        console.log('    - Likes:', video.likes_count);
+        console.log('    - Comments:', video.comments_count);
+        console.log('    - Shares:', video.shares_count);
+
+        // Streamlined, single-pass parsing
+let parsedTags = [];
+if (video.tags) {
+  if (typeof video.tags === 'string') {
+    try {
+      parsedTags = video.tags.trim() ? JSON.parse(video.tags) : [];
+    } catch {
+      parsedTags = [];
+    }
+  } else if (Array.isArray(video.tags)) {
+    parsedTags = video.tags;
+  }
+}
+
+        return {
+          ...video,
+          tags: parsedTags,
           isLiked: true,
-        }));
+          likes_count: video.likes_count || 0,
+          comments_count: video.comments_count || 0,
+          shares_count: video.shares_count || 0,
+          caption: video.caption || '',
+         created_at: video.created_at || new Date().toISOString(),
+          createdAt: video.created_at || new Date().toISOString(),
+        };
+      });
 
-      setLikedVideos(likedVideosData);
-    } catch (error) {
-      console.error('Error loading liked videos:', error);
-    } finally {
-      setLoading(false);
+    console.log('✅ Processed', processedVideos.length, 'liked videos');
+    console.log('=== LOADING LIKED VIDEOS COMPLETE ===');
+
+    setLikedVideos(processedVideos);
+  } catch (error) {
+    console.error('❌ Error in loadLikedVideos:', error);
+    Alert.alert('Error', 'Failed to load liked videos. Please try again.');
+    setLikedVideos([]);
+  } finally {
+    setLoading(false);
+  }
+};
+
+const loadProfile = async () => {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    // 🔧 FIX: Set user ID for coin balance hook
+    setUserId(user.id);
+
+const { data, error } = await supabase
+  .from('users')
+  .select('*, is_premium, premium_expires_at, coins')
+  .eq('id', user.id)
+  .single();
+
+    if (error) throw error;
+
+    console.log('📊 Lifetime Stats:');
+    console.log('  Videos:', data.lifetime_videos_count);
+    console.log('  Likes:', data.lifetime_likes_count);
+    console.log('  Views:', data.lifetime_views_count);
+
+    setProfile(data);
+    setEditedProfile(data);
+  } catch (error) {
+    console.error('Error loading profile:', error);
+  }
+};
+
+// 🆕 Reload follower/following counts
+const reloadProfileCounts = async () => {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const { data, error } = await supabase
+      .from('users')
+      .select('followers_count, following_count')
+      .eq('id', user.id)
+      .single();
+
+    if (error) {
+      console.error('Error reloading counts:', error);
+      return;
     }
-  };
 
-  const handleCancelPendingUpload = async (uploadId: string) => {
-    try {
-      const { error } = await supabase
-        .from('pending_uploads')
-        .delete()
-        .eq('id', uploadId);
+    // Update only the counts, keep rest of profile intact
+    setProfile((prev: any) => ({
+  ...prev,
+  followers_count: data.followers_count,
+  following_count: data.following_count,
+}));
 
-      if (error) throw error;
+    console.log('✅ Profile counts reloaded:', {
+      followers: data.followers_count,
+      following: data.following_count,
+    });
+  } catch (error) {
+    console.error('Error in reloadProfileCounts:', error);
+  }
+};
 
-      setPendingUploads(pendingUploads.filter(u => u.id !== uploadId));
-      Alert.alert('Success', 'Upload cancelled');
-    } catch (error) {
-      console.error('Error cancelling upload:', error);
-      Alert.alert('Error', 'Failed to cancel upload');
+const loadMyRequests = async () => {
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🔄 LOADING MY REQUESTS - NEW VERSION');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  
+  try {
+    setLoading(true);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    console.log('📥 Fetching requests for user:', user.id);
+
+    // First, get all requests
+    const { data: requests, error: requestError } = await supabase
+      .from('video_requests')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    if (requestError) {
+      console.error('❌ Error fetching requests:', requestError);
+      throw requestError;
     }
-  };
 
-  const loadProfile = async () => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+    console.log('✅ Fetched', requests?.length || 0, 'requests');
 
-      const { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', user.id)
-        .single();
+    // Then, for each request, count fulfillments
+    console.log('🔢 Counting fulfillments for each request...');
+    
+    const requestsWithCount = await Promise.all(
+      (requests || []).map(async (request) => {
+        console.log(`  Counting for request ${request.id}...`);
+        
+        const { count } = await supabase
+          .from('request_fulfillments')
+          .select('*', { count: 'exact', head: true })
+          .eq('request_id', request.id);
 
-      if (error) throw error;
+        console.log(`    → Count: ${count || 0}`);
 
-      setProfile(data);
-      setEditedProfile(data);
-    } catch (error) {
-      console.error('Error loading profile:', error);
-    }
-  };
+        return {
+          ...request,
+          fulfillment_count: count || 0,
+        };
+      })
+    );
 
-  const loadMyRequests = async () => {
-    try {
-      setLoading(true);
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const { data, error } = await supabase
-        .from('video_requests')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-
-      setMyRequests(data || []);
-      updateRequestTimers();
-    } catch (error) {
-      console.error('Error loading requests:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+    console.log('📊 Final requests with counts:');
+    requestsWithCount.forEach((req, i) => {
+      console.log(`  ${i + 1}. ${req.description} - fulfillments: ${req.fulfillment_count}`);
+    });
+    
+    setMyRequests(requestsWithCount);
+    updateRequestTimers();
+    
+    console.log('✅ loadMyRequests complete');
+  } catch (error) {
+    console.error('❌ Error loading requests:', error);
+  } finally {
+    setLoading(false);
+  }
+};
 
   const loadNotifications = async () => {
     try {
@@ -448,12 +937,13 @@ export default function ProfileScreen() {
       const { data, error } = await supabase
         .from('notifications')
         .select(`
-          *,
-          users!notifications_actor_id_fkey (
-            username,
-            avatar_url
-          )
-        `)
+  *,
+  users!notifications_actor_id_fkey (
+    username,
+    avatar_url,
+    is_premium
+  )
+`)
         .eq('user_id', user.id)
         .order('created_at', { ascending: false });
 
@@ -477,15 +967,15 @@ export default function ProfileScreen() {
     }
   };
 
-  const updateRequestTimers = () => {
-    if (requestTimerRef.current) {
-      clearInterval(requestTimerRef.current);
-    }
-
-    requestTimerRef.current = setInterval(() => {
-      setMyRequests(prevRequests => [...prevRequests]);
-    }, 60000);
-  };
+const updateRequestTimers = () => {
+  if (requestTimerRef.current) {
+    clearInterval(requestTimerRef.current);
+  }
+  requestTimerRef.current = setInterval(() => {
+    if (!mountedRef.current) return;
+    setMyRequests(prevRequests => [...prevRequests]);
+  }, 60000);
+};
 
   const handleEditRequest = (request: any) => {
     router.push({
@@ -502,41 +992,104 @@ export default function ProfileScreen() {
     });
   };
 
-  const handleRepostRequest = async (request: any) => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+const handleRepostRequest = async (request: any) => {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
 
-      const newExpiresAt = new Date();
-      newExpiresAt.setHours(newExpiresAt.getHours() + (request.duration || 24));
+    const newExpiresAt = new Date();
+    newExpiresAt.setHours(newExpiresAt.getHours() + (request.duration_hours || 24));
 
-      const { error } = await supabase
-        .from('video_requests')
-        .insert({
-          user_id: user.id,
-          description: request.description,
-          location_type: request.location_type,
-          latitude: request.latitude,
-          longitude: request.longitude,
-          location_name: request.location_name,
-          duration: request.duration,
-          expires_at: newExpiresAt.toISOString(),
-        });
+    // Create the new request
+    const { error: insertError } = await supabase
+      .from('video_requests')
+      .insert({
+        user_id: user.id,
+        description: request.description,
+        location_type: request.location_type,
+        location_latitude: request.location_latitude,
+        location_longitude: request.location_longitude,
+        address: request.address || 'Selected Location',
+        duration_hours: request.duration_hours,
+        expires_at: newExpiresAt.toISOString(),
+        status: 'open',
+      });
 
-      if (error) throw error;
+    if (insertError) throw insertError;
 
-      Alert.alert('Success', 'Request reposted successfully');
-      loadMyRequests();
-    } catch (error) {
-      console.error('Error reposting request:', error);
-      Alert.alert('Error', 'Failed to repost request');
+    // Delete the old request
+    const { error: deleteError } = await supabase
+      .from('video_requests')
+      .delete()
+      .eq('id', request.id);
+
+    if (deleteError) throw deleteError;
+
+    Alert.alert('Success', 'Request reposted successfully');
+    loadMyRequests();
+  } catch (error) {
+    console.error('Error reposting request:', error);
+    Alert.alert('Error', 'Failed to repost request');
+  }
+};
+
+const handleDeleteRequest = async (requestId: string) => {
+  try {
+    // Get the request details first
+    const { data: request, error: requestError } = await supabase
+      .from('video_requests')
+      .select('status, winner_video_id')
+      .eq('id', requestId)
+      .single();
+
+    if (requestError) throw requestError;
+
+    // Check if request has fulfillments
+    const { count: fulfillmentCount } = await supabase
+      .from('request_fulfillments')
+      .select('*', { count: 'exact', head: true })
+      .eq('request_id', requestId);
+
+    // Block deletion only if:
+    // 1. Has fulfillments AND
+    // 2. No winner selected yet (winner_video_id is null) AND
+    // 3. Status is still 'open'
+    if (fulfillmentCount && fulfillmentCount > 0 && !request.winner_video_id && request.status === 'open') {
+      Alert.alert(
+        'Cannot Delete',
+        'This request has fulfillment videos. Please select a winner before deleting.',
+        [{ text: 'OK' }]
+      );
+      return;
     }
-  };
 
-  const handleDeleteRequest = async (requestId: string) => {
-    Alert.alert(
-      'Delete Request',
-      'Are you sure you want to delete this request?',
+    // Check if already refunded to customize message
+const { data: refundCheckData } = await supabase
+  .from('video_requests')
+  .select('refunded')
+  .eq('id', requestId)
+  .single();
+
+const isAlreadyRefunded = refundCheckData?.refunded || false;
+
+// Determine refund message
+const shouldRefund = fulfillmentCount === 0;
+let deleteMessage = '';
+
+if (shouldRefund && isAlreadyRefunded) {
+  deleteMessage = "You've already been refunded 100 POPCoins. Delete this request?";
+} else if (shouldRefund) {
+  deleteMessage = 'No one fulfilled this request. You will be refunded 100 POPCoins. Delete this request?';
+} else if (request.winner_video_id) {
+  deleteMessage = 'This request has been completed. Delete this request?';
+} else {
+  deleteMessage = 'Are you sure you want to delete this request?';
+}
+
+// Show confirmation dialog
+Alert.alert(
+  'Delete Request',
+  deleteMessage,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -544,15 +1097,85 @@ export default function ProfileScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              const { error } = await supabase
+              const { data: { user } } = await supabase.auth.getUser();
+              if (!user) return;
+
+              // Verify ownership
+              const { data: requestData } = await supabase
                 .from('video_requests')
-                .delete()
-                .eq('id', requestId);
+                .select('user_id')
+                .eq('id', requestId)
+                .single();
 
-              if (error) throw error;
+              if (!requestData || requestData.user_id !== user.id) {
+                Alert.alert('Error', 'Invalid request');
+                return;
+              }
 
-              setMyRequests(myRequests.filter(r => r.id !== requestId));
-              Alert.alert('Success', 'Request deleted successfully');
+              // 🔍 Check if already refunded BEFORE deleting
+let alreadyRefunded = false;
+if (shouldRefund) {
+  const { data: requestData } = await supabase
+    .from('video_requests')
+    .select('refunded')
+    .eq('id', requestId)
+    .single();
+  
+  alreadyRefunded = requestData?.refunded || false;
+  console.log('🔍 Already refunded?', alreadyRefunded);
+}
+
+// Delete the request
+const { error: deleteError } = await supabase
+  .from('video_requests')
+  .delete()
+  .eq('id', requestId);
+
+if (deleteError) throw deleteError;
+
+// Refund 100 coins if no fulfillments AND not already refunded
+if (shouldRefund && !alreadyRefunded) {
+  console.log('💰 Refunding 100 coins for deleted request with no fulfillments');
+  
+  const { data: userData } = await supabase
+    .from('users')
+    .select('coins')
+    .eq('id', user.id)
+    .single();
+
+  const currentCoins = userData?.coins || 0;
+  const newCoins = currentCoins + 100;
+
+  const { error: coinsError } = await supabase
+    .from('users')
+    .update({ coins: newCoins })
+    .eq('id', user.id);
+
+  if (coinsError) {
+    console.error('Error refunding coins:', coinsError);
+  } else {
+    await supabase
+      .from('coin_transactions')
+      .insert({
+        user_id: user.id,
+        amount: 100,
+        type: 'request_refund',
+        description: 'Request deleted - no fulfillments',
+      });
+
+    console.log('✅ 100 coins refunded');
+  }
+}
+
+// Update local state
+setMyRequests(myRequests.filter(r => r.id !== requestId));
+
+Alert.alert(
+  'Success', 
+  (shouldRefund && !alreadyRefunded)
+    ? 'Request deleted and 100 coins refunded' 
+    : 'Request deleted successfully'
+);
             } catch (error) {
               console.error('Error deleting request:', error);
               Alert.alert('Error', 'Failed to delete request');
@@ -561,157 +1184,298 @@ export default function ProfileScreen() {
         },
       ]
     );
-  };
+  } catch (error) {
+    console.error('Error in handleDeleteRequest:', error);
+    Alert.alert('Error', 'Failed to check request status');
+  }
+};
 
-  const handleViewFulfillments = (request: any) => {
+const handleViewFulfillments = (request: any) => {
+  router.push({
+    pathname: '/fulfillment-videos',
+    params: { 
+      requestId: request.id,
+      refresh: Date.now().toString() // Force fresh data load
+    },
+  });
+};
+
+const handleNotificationPress = async (notification: any) => {
+  console.log('=== NOTIFICATION PRESSED ===');
+  console.log('Notification type:', notification.type);
+  console.log('Notification data:', JSON.stringify(notification, null, 2));
+
+  // NEW: First fulfillment notification
+if (notification.type === 'request_first_fulfillment') {
+  router.push({
+    pathname: '/fulfillment-videos',
+    params: { requestId: notification.request_id },
+  })
+  return
+}
+
+// NEW: Request expiring soon
+if (notification.type === 'request_expiring_soon') {
+  router.push({
+    pathname: '/fulfillment-videos',
+    params: { requestId: notification.request_id },
+  });
+  return;
+}
+
+// NEW: Request expired with no fulfillments
+if (notification.type === 'request_expired_no_fulfillments') {
+  // Just acknowledge - no fulfillments to view
+  return;
+}
+
+// NEW: Fulfillment milestone
+if (notification.type === 'fulfillment_milestone') {
+  router.push({
+    pathname: '/fulfillment-videos',
+    params: { requestId: notification.request_id },
+  });
+  return;
+}
+
+// NEW: Follower milestone
+if (notification.type === 'follower_milestone') {
+  // Navigate to their own followers list
+  router.push({
+    pathname: '/followers-list',
+    params: { userId: profile.id, listType: 'followers' },
+  });
+  return;
+}
+
+// NEW: Nearby request needs help
+if (notification.type === 'nearby_request_needs_help') {
+  router.push({
+    pathname: '/fulfillment-videos',
+    params: { requestId: notification.request_id },
+  });
+  return;
+}
+
+// NEW: View milestone
+if (notification.type === 'view_milestone') {
+  // Creator can view their own video for 3 days
+  return;
+}
+
+// NEW: Welcome onboarding
+if (notification.type === 'welcome') {
+  // No specific navigation needed
+  return;
+}
+
+// NEW: Re-engagement
+if (notification.type === 'reengagement') {
+  return;
+}
+
+// NEW: Contributor Bonus notification
+if (notification.type === 'contributor_bonus') {
+  router.push({
+    pathname: '/fulfillment-videos',
+    params: { requestId: notification.request_id },
+  });
+  return;
+}
+
+// NEW: Request expired - grace period started
+if (notification.type === 'request_expired_grace_period') {
+  router.push({
+    pathname: '/fulfillment-videos',
+    params: { requestId: notification.request_id },
+  })
+  return
+}
+
+// NEW: 12h reminder
+if (notification.type === 'winner_selection_reminder_12h') {
+  Alert.alert(
+    '⏰ 12 Hours Left!',
+    'Pick your winner soon or the first video will be auto-selected.',
+    [{ 
+      text: 'Pick Winner Now',
+      onPress: () => router.push({
+        pathname: '/fulfillment-videos',
+        params: { requestId: notification.request_id },
+      })
+    }]
+  )
+  return
+}
+
+// NEW: 1h urgent reminder
+if (notification.type === 'winner_selection_reminder_1h') {
+  Alert.alert(
+    '⚠️ URGENT: 1 Hour Left!',
+    'Pick your winner NOW or the first video wins automatically!',
+    [{ 
+      text: 'Pick Winner NOW',
+      onPress: () => router.push({
+        pathname: '/fulfillment-videos',
+        params: { requestId: notification.request_id },
+      })
+    }]
+  )
+  return
+}
+
+// NEW: Auto-winner selected (requester)
+if (notification.type === 'auto_winner_selected_requester') {
+  router.push({
+    pathname: '/fulfillment-videos',
+    params: { requestId: notification.request_id },
+  })
+  return
+}
+
+// NEW: Auto-winner selected (winner) - play video directly
+if (notification.type === 'auto_winner_selected_winner') {
+  if (notification.video_id) {
+    await navigateToVideoOrProfile(notification.video_id, notification.actor_id, router);
+  }
+  return;
+}
+
+// NEW: Manual winner selection - play video directly
+if (notification.type === 'request_winner_manual') {
+  if (notification.video_id) {
+    await navigateToVideoOrProfile(notification.video_id, notification.actor_id, router);
+  }
+  return;
+}
+
+// Handle all video notifications with expiry check
+if (notification.type === 'like' || 
+    notification.type === 'comment' || 
+    notification.type === 'comment_reply' ||
+    notification.type === 'view_milestone' ||
+    notification.type === 'following_new_video' ||
+    notification.type === 'nearby_video') {  // ← Changed from 'nearby_new_video' to 'nearby_video'
+  if (notification.video_id) {
+    await navigateToVideoOrProfile(notification.video_id, notification.actor_id, router);
+  }
+  return;
+}
+
+// Nearby request - navigate to request details
+if (notification.type === 'nearby_request') {
+  if (notification.request_id) {
     router.push({
-      pathname: '/fulfillment-videos',
-      params: { requestId: request.id },
+      pathname: '/request-details',
+      params: { requestId: notification.request_id },
     });
-  };
+  }
+  return;
+}
 
-  const handleNotificationPress = async (notification: any) => {
-    console.log('=== NOTIFICATION PRESSED ===');
-    console.log('Notification type:', notification.type);
-    console.log('Notification data:', JSON.stringify(notification, null, 2));
-
-    try {
-      // (1) "Someone fulfilled your video request" notification
-      if (notification.type === 'request_fulfilled') {
-        console.log('📹 Handling request_fulfilled notification');
-        console.log('video_id:', notification.video_id);
-        console.log('request_id:', notification.request_id);
-        
-        if (!notification.video_id) {
-          console.error('❌ No video_id in notification');
-          Alert.alert('Error', 'Video information is missing');
-          return;
-        }
-
-        if (!notification.request_id) {
-          console.error('❌ No request_id in notification');
-          Alert.alert('Error', 'Request information is missing');
-          return;
-        }
-
-        // Verify the video exists in the database before navigating
-        console.log('🔍 Verifying video exists in database...');
-        const { data: videoData, error: videoError } = await supabase
-          .from('videos')
-          .select('id, video_url, caption')
-          .eq('id', notification.video_id)
-          .single();
-
-        if (videoError || !videoData) {
-          console.error('❌ Video not found in database:', videoError);
-          Alert.alert('Error', 'This video is no longer available');
-          return;
-        }
-
-        console.log('✅ Video found:', videoData);
-        console.log('📱 Navigating to fulfillment videos...');
-        
-        router.push({
-          pathname: '/fulfillment-videos',
-          params: {
-            requestId: notification.request_id,
-            videoId: notification.video_id,
-          },
-        });
-      }
-      // (2) "Someone liked your video" notification
-      else if (notification.type === 'like') {
-        console.log('❤️ Handling like notification');
-        console.log('video_id:', notification.video_id);
-        
-        if (!notification.video_id) {
-          console.error('❌ No video_id in like notification');
-          Alert.alert('Error', 'Video information is missing');
-          return;
-        }
-
-        // Verify the video exists
-        console.log('🔍 Verifying video exists...');
-        const { data: videoData, error: videoError } = await supabase
-          .from('videos')
-          .select('id, video_url, caption')
-          .eq('id', notification.video_id)
-          .single();
-
-        if (videoError || !videoData) {
-          console.error('❌ Video not found:', videoError);
-          Alert.alert('Error', 'This video is no longer available');
-          return;
-        }
-
-        console.log('✅ Video found:', videoData);
-        console.log('📱 Navigating to video player...');
-        
-        router.push({
-          pathname: '/search-video-player',
-          params: { videoId: notification.video_id },
-        });
-      }
-      // (3) "Someone commented on your video" notification
-      else if (notification.type === 'comment') {
-        console.log('💬 Handling comment notification');
-        console.log('video_id:', notification.video_id);
-        
-        if (!notification.video_id) {
-          console.error('❌ No video_id in comment notification');
-          Alert.alert('Error', 'Video information is missing');
-          return;
-        }
-
-        // Verify the video exists
-        console.log('🔍 Verifying video exists...');
-        const { data: videoData, error: videoError } = await supabase
-          .from('videos')
-          .select('id, video_url, caption')
-          .eq('id', notification.video_id)
-          .single();
-
-        if (videoError || !videoData) {
-          console.error('❌ Video not found:', videoError);
-          Alert.alert('Error', 'This video is no longer available');
-          return;
-        }
-
-        console.log('✅ Video found:', videoData);
-        console.log('📱 Navigating to video player...');
-        
-        router.push({
-          pathname: '/search-video-player',
-          params: { videoId: notification.video_id },
-        });
-      }
-      // (4) "Someone started following you" notification
-      else if (notification.type === 'follow') {
-        console.log('👤 Handling follow notification');
-        console.log('actor_id:', notification.actor_id);
-        
-        if (!notification.actor_id) {
-          console.error('❌ No actor_id in follow notification');
-          Alert.alert('Error', 'User information is missing');
-          return;
-        }
-
-        console.log('📱 Navigating to user profile...');
-        router.push({
-          pathname: '/user-profile',
-          params: { userId: notification.actor_id },
-        });
-      }
-      // Fallback for unknown notification types
-      else {
-        console.warn('⚠️ Unknown notification type:', notification.type);
-        Alert.alert('Error', 'Unable to handle this notification type');
-      }
-    } catch (error) {
-      console.error('❌ Error handling notification press:', error);
-      Alert.alert('Error', 'Failed to navigate to content. Please try again.');
+// Handle premium notifications (no navigation needed)
+if (notification.type === 'premium_activated' || notification.type === 'premium_expired') {
+  // Just acknowledge - no navigation needed
+  return;
+}
+// Handle avatar_rejected notification (no navigation needed)
+if (notification.type === 'avatar_rejected') {
+  // Just acknowledge - no navigation needed
+  return;
+}
+// Handle system notifications (no navigation needed)
+if (notification.type === 'welcome' || notification.type === 'reengagement') {
+  // Just acknowledge - no navigation needed
+  return;
+}
+  try {
+    // Handle video_rejected notifications
+    if (notification.type === 'video_rejected') {
+      console.log('🚫 Handling video_rejected notification');
+      Alert.alert(
+        'Video Rejected',
+        notification.message,
+        [{ text: 'OK' }]
+      );
+      return;
     }
-  };
+
+    // (1) "Someone fulfilled your video request" notification
+    if (notification.type === 'request_fulfilled') {
+      console.log('📹 Handling request_fulfilled notification');
+      console.log('video_id:', notification.video_id);
+      console.log('request_id:', notification.request_id);
+      
+      if (!notification.video_id) {
+        console.error('❌ No video_id in notification');
+        Alert.alert('Error', 'Video information is missing');
+        return;
+      }
+
+      if (!notification.request_id) {
+        console.error('❌ No request_id in notification');
+        Alert.alert('Error', 'Request information is missing');
+        return;
+      }
+
+      // Verify the video exists in the database before navigating
+      console.log('🔍 Verifying video exists in database...');
+      const { data: videoData, error: videoError } = await supabase
+        .from('videos')
+        .select('id, video_url, caption')
+        .eq('id', notification.video_id)
+        .single();
+
+      if (videoError || !videoData) {
+        console.error('❌ Video not found in database:', videoError);
+        Alert.alert('Error', 'This video is no longer available');
+        return;
+      }
+
+      console.log('✅ Video found:', videoData);
+      console.log('📱 Navigating to fulfillment videos...');
+
+      // ✅ ADD THIS LOGGING BLOCK:
+  console.log('🚀 About to navigate with params:', {
+    requestId: notification.request_id,
+    videoId: notification.video_id,
+  });
+      
+      router.push({
+        pathname: '/fulfillment-videos',
+        params: {
+          requestId: notification.request_id,
+          videoId: notification.video_id,
+        },
+      });
+    }
+    // (2) "Someone started following you" notification
+    else if (notification.type === 'follow') {
+      console.log('👤 Handling follow notification');
+      console.log('actor_id:', notification.actor_id);
+      
+      if (!notification.actor_id) {
+        console.error('❌ No actor_id in follow notification');
+        Alert.alert('Error', 'User information is missing');
+        return;
+      }
+
+      console.log('📱 Navigating to user profile...');
+      router.push({
+        pathname: '/user-profile',
+        params: { userId: notification.actor_id },
+      });
+    }
+    // Fallback for unknown notification types
+    else {
+      console.warn('⚠️ Unknown notification type:', notification.type);
+      Alert.alert('Error', 'Unable to handle this notification type');
+    }
+  } catch (error) {
+    console.error('❌ Error handling notification press:', error);
+    Alert.alert('Error', 'Failed to navigate to content. Please try again.');
+  }
+};
 
   const handleNotificationAvatarPress = (notification: any) => {
     if (notification.actor_id) {
@@ -819,46 +1583,122 @@ export default function ProfileScreen() {
     }
   };
 
-  const uploadAvatar = async (uri: string) => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+const uploadAvatar = async (uri: string) => {
+  try {
+    console.log('🖼️ === STARTING AVATAR UPLOAD ===');
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
 
-      const fileName = `${user.id}-${Date.now()}.jpg`;
-      const fileExt = uri.split('.').pop();
-      const filePath = `${user.id}/${fileName}`;
+    const previousAvatarUrl = profile?.avatar_url;
+    console.log('📸 Previous avatar URL:', previousAvatarUrl);
 
-      const base64 = await FileSystem.readAsStringAsync(uri, {
-        encoding: FileSystem.EncodingType.Base64,
+    const fileName = `${user.id}-${Date.now()}.jpg`;
+    const fileExt = uri.split('.').pop();
+    const filePath = `${user.id}/${fileName}`;
+
+    console.log('📤 Uploading avatar to storage...');
+    const base64 = await FileSystem.readAsStringAsync(uri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+
+    const { error: uploadError } = await supabase.storage
+      .from('avatars')
+      .upload(filePath, decode(base64), {
+        contentType: `image/${fileExt}`,
+        upsert: true,
       });
 
-      const { error: uploadError } = await supabase.storage
-        .from('avatars')
-        .upload(filePath, decode(base64), {
-          contentType: `image/${fileExt}`,
-          upsert: true,
-        });
+    if (uploadError) throw uploadError;
 
-      if (uploadError) throw uploadError;
+    const { data: { publicUrl } } = supabase.storage
+      .from('avatars')
+      .getPublicUrl(filePath);
 
-      const { data: { publicUrl } } = supabase.storage
-        .from('avatars')
-        .getPublicUrl(filePath);
+    console.log('✅ Avatar uploaded to storage:', publicUrl);
 
-      const { error: updateError } = await supabase
-        .from('users')
-        .update({ avatar_url: publicUrl })
-        .eq('id', user.id);
+    console.log('🔍 Triggering avatar moderation...');
+    const { data: moderationData, error: moderationError } = await supabase.functions.invoke(
+      'moderate-avatar',
+      {
+        body: {
+          userId: user.id,
+          avatarUrl: publicUrl,
+          previousAvatarUrl: previousAvatarUrl,
+        },
+      }
+    );
 
-      if (updateError) throw updateError;
-
-      setProfile({ ...profile, avatar_url: publicUrl });
-      Alert.alert('Success', 'Avatar updated successfully');
-    } catch (error) {
-      console.error('Error uploading avatar:', error);
-      Alert.alert('Error', 'Failed to upload avatar');
+    if (moderationError) {
+      console.error('❌ Moderation error:', moderationError);
+      
+      // Delete the uploaded file
+      await supabase.storage.from('avatars').remove([filePath]);
+      
+      Alert.alert('Error', 'Failed to moderate avatar. Please try again.');
+      return;
     }
-  };
+
+    console.log('📊 Moderation result:', moderationData);
+
+    if (!moderationData.approved) {
+      console.log('❌ Avatar rejected by moderation');
+      
+      // DELETE the rejected avatar from storage
+      console.log('🗑️ Deleting rejected avatar from storage...');
+      const { error: deleteError } = await supabase.storage
+        .from('avatars')
+        .remove([filePath]);
+      
+      if (deleteError) {
+        console.error('Error deleting rejected avatar:', deleteError);
+      } else {
+        console.log('✅ Rejected avatar deleted from storage');
+      }
+      
+      // RESTORE previous avatar in database
+      console.log('🔄 Restoring previous avatar...');
+      if (previousAvatarUrl) {
+        const { error: restoreError } = await supabase
+          .from('users')
+          .update({ avatar_url: previousAvatarUrl })
+          .eq('id', user.id);
+        
+        if (restoreError) {
+          console.error('Error restoring previous avatar:', restoreError);
+        } else {
+          console.log('✅ Previous avatar restored');
+        }
+      }
+      
+      // Update local state with previous avatar
+      setProfile({ ...profile, avatar_url: previousAvatarUrl });
+      
+      Alert.alert(
+        'Avatar Rejected',
+        'Your profile picture was rejected because it contained inappropriate content. Your previous avatar has been restored.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    console.log('✅ Avatar approved by moderation');
+
+    console.log('💾 Updating user profile with new avatar...');
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({ avatar_url: publicUrl })
+      .eq('id', user.id);
+
+    if (updateError) throw updateError;
+
+    setProfile({ ...profile, avatar_url: publicUrl });
+    console.log('✅ Avatar updated successfully');
+    Alert.alert('Success', 'Avatar updated successfully');
+  } catch (error) {
+    console.error('❌ Error uploading avatar:', error);
+    Alert.alert('Error', 'Failed to upload avatar');
+  }
+};
 
   const decode = (base64: string) => {
     const binaryString = atob(base64);
@@ -867,10 +1707,6 @@ export default function ProfileScreen() {
       bytes[i] = binaryString.charCodeAt(i);
     }
     return bytes;
-  };
-
-  const handleEditProfile = () => {
-    setIsEditMode(true);
   };
 
   const handleGetCurrentLocation = async () => {
@@ -901,32 +1737,19 @@ export default function ProfileScreen() {
     }
   };
 
-  const toggleCategory = (category: string) => {
-    const currentCategories = editedProfile.categories || [];
-    const newCategories = currentCategories.includes(category)
-      ? currentCategories.filter((c: string) => c !== category)
-      : [...currentCategories, category];
-
-    setEditedProfile({
-      ...editedProfile,
-      categories: newCategories,
-    });
-  };
-
   const handleSaveProfile = async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
       const { error } = await supabase
-        .from('users')
-        .update({
-          display_name: editedProfile.display_name,
-          bio: editedProfile.bio,
-          location: editedProfile.location,
-          categories: editedProfile.categories,
-        })
-        .eq('id', user.id);
+  .from('users')
+  .update({
+    bio: editedProfile.bio,
+    location: editedProfile.location,
+    categories: editedProfile.categories,
+  })
+  .eq('id', user.id);
 
       if (error) throw error;
 
@@ -939,29 +1762,6 @@ export default function ProfileScreen() {
     }
   };
 
-  const handleSignOut = async () => {
-    Alert.alert(
-      'Sign Out',
-      'Are you sure you want to sign out?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Sign Out',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await supabase.auth.signOut();
-              router.replace('/auth/sign-in');
-            } catch (error) {
-              console.error('Error signing out:', error);
-              Alert.alert('Error', 'Failed to sign out');
-            }
-          },
-        },
-      ]
-    );
-  };
-
   const formatCount = (count: number): string => {
     if (count >= 1000000) {
       return `${(count / 1000000).toFixed(1)}M`;
@@ -971,35 +1771,68 @@ export default function ProfileScreen() {
     return count.toString();
   };
 
-  const handleSaveVideo = async (videoUrl: string, videoId: string) => {
-    try {
-      const hasPermission = await requestMediaLibrarySavePermission();
-      if (!hasPermission) {
-        Alert.alert('Permission Denied', 'Media library permission is required to save videos');
-        return;
-      }
-
-      Alert.alert('Downloading', 'Please wait while we download your video...');
-
-      const downloadUrl = await getVideoDownloadUrl(videoUrl);
-      const fileName = `POPNOW_${videoId}_${Date.now()}.mp4`;
-      const fileUri = `${FileSystem.documentDirectory}${fileName}`;
-
-      const downloadResult = await FileSystem.downloadAsync(downloadUrl, fileUri);
-
-      if (downloadResult.status !== 200) {
-        throw new Error('Download failed');
-      }
-
-      const asset = await MediaLibrary.createAssetAsync(downloadResult.uri);
-      await MediaLibrary.createAlbumAsync('POPNOW', asset, false);
-
-      Alert.alert('Success', 'Video saved to your gallery');
-    } catch (error: any) {
-      console.error('Error saving video:', error);
-      Alert.alert('Error', error.message || 'Failed to save video');
+const handleSaveVideo = async (videoUrl: string, videoId: string, libraryId?: number) => {
+  try {
+    // Request both permissions
+    const permissionResult = await requestMediaLibrarySavePermission();
+    
+    if (!permissionResult.granted) {
+      Alert.alert('Permission Denied', 'Media library permission is required to save videos');
+      return;
     }
-  };
+
+    const downloadUrl = await getVideoDownloadUrl(videoUrl, libraryId);
+    
+    const timestamp = Date.now();
+    const randomSuffix = Math.random().toString(36).substring(2, 8);
+    const videoIdShort = videoId.substring(0, 8);
+    const fileName = `POPNOW_${videoIdShort}_${timestamp}_${randomSuffix}.mp4`;
+    
+    // Use expo-file-system with unique directory per download
+    const uniqueDir = new Directory(Paths.cache, `downloads/${timestamp}_${randomSuffix}`);
+    try {
+      uniqueDir.create({ intermediates: true });
+    } catch (dirError) {
+      console.log('Download directory creation note:', dirError);
+    }
+    
+    const downloadedFile = await File.downloadFileAsync(downloadUrl, uniqueDir);
+    
+    if (!downloadedFile.exists || downloadedFile.size === 0) {
+      throw new Error('Downloaded file is empty or does not exist');
+    }
+    
+    // Create asset (this also saves to library) and add to POPNOW album
+    console.log('💾 Saving to photo library...');
+    const asset = await MediaLibrary.createAssetAsync(downloadedFile.uri);
+    console.log('✅ Asset created, adding to POPNOW album...');
+    
+    try {
+      const album = await MediaLibrary.getAlbumAsync('POPNOW');
+      if (album) {
+        await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
+        console.log('✅ Added to existing POPNOW album');
+      } else {
+        await MediaLibrary.createAlbumAsync('POPNOW', asset, false);
+        console.log('✅ Created POPNOW album and added video');
+      }
+    } catch (albumError: any) {
+      console.log('Album operation note (non-critical):', albumError.message || albumError);
+    }
+    
+    // Clean up temp file
+    try {
+      downloadedFile.delete();
+    } catch (cleanupError: any) {
+      console.log('Cleanup note (non-critical):', cleanupError.message || cleanupError);
+    }
+    
+    Alert.alert('Success', 'Video saved to your gallery');
+  } catch (error: any) {
+    console.error('Error saving video:', error);
+    Alert.alert('Error', error.message || 'Failed to save video');
+  }
+};
 
   const handleDeleteVideo = async (videoId: string) => {
     Alert.alert(
@@ -1015,15 +1848,14 @@ export default function ProfileScreen() {
               const video = videos.find(v => v.id === videoId);
               if (!video) return;
 
-              // Delete from Bunny.net first
               if (video.video_url) {
                 const bunnyVideoId = extractVideoId(video.video_url);
                 if (bunnyVideoId) {
-                  await deleteStreamVideo(bunnyVideoId);
+                  const isPremium = video.library_id === 597832;
+await deleteStreamVideo(bunnyVideoId, isPremium);
                 }
               }
 
-              // Then delete from database
               const { error } = await supabase
                 .from('videos')
                 .delete()
@@ -1063,45 +1895,85 @@ export default function ProfileScreen() {
     }
   };
 
-  const handleLike = async (videoId: string) => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+const handleLike = async (videoId: string) => {
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🎯 PROFILE: LIKE HANDLER CALLED');
+  console.log('  Video ID:', videoId);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-      const video = videos.find(v => v.id === videoId);
-      if (!video) return;
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
 
-      if (video.isLiked) {
-        const { error } = await supabase
-          .from('likes')
-          .delete()
-          .eq('video_id', videoId)
-          .eq('user_id', user.id);
-
-        if (error) throw error;
-
-        setVideos(videos.map(v =>
-          v.id === videoId
-            ? { ...v, isLiked: false, likes_count: v.likes_count - 1 }
-            : v
-        ));
-      } else {
-        const { error } = await supabase
-          .from('likes')
-          .insert({ video_id: videoId, user_id: user.id });
-
-        if (error) throw error;
-
-        setVideos(videos.map(v =>
-          v.id === videoId
-            ? { ...v, isLiked: true, likes_count: v.likes_count + 1 }
-            : v
-        ));
-      }
-    } catch (error) {
-      console.error('Error toggling like:', error);
+    // Find the video in current list
+    const video = videos.find(v => v.id === videoId);
+    if (!video) {
+      console.log('⚠️ Video not found in videos list');
+      return;
     }
-  };
+
+    const currentIsLiked = video.isLiked;
+    console.log('  Current isLiked:', currentIsLiked);
+
+    if (currentIsLiked) {
+      // Unlike: Remove from likes table
+      console.log('➖ Removing like...');
+      const { error } = await supabase
+        .from('likes')
+        .delete()
+        .eq('video_id', videoId)
+        .eq('user_id', user.id);
+
+      if (error) {
+        console.error('❌ Error removing like:', error);
+        return;
+      }
+
+      console.log('✅ Like removed - trigger will update videos.likes_count');
+
+      // Update local state optimistically
+      setVideos(videos.map(v =>
+        v.id === videoId
+          ? { 
+              ...v, 
+              isLiked: false, 
+              likes_count: Math.max(0, (v.likes_count || 0) - 1)
+            }
+          : v
+      ));
+    } else {
+      // Like: Insert into likes table
+      console.log('➕ Adding like...');
+      const { error } = await supabase
+        .from('likes')
+        .insert({ video_id: videoId, user_id: user.id });
+
+      if (error) {
+        console.error('❌ Error adding like:', error);
+        return;
+      }
+
+      console.log('✅ Like added - trigger will update videos.likes_count');
+
+      // Update local state optimistically
+      setVideos(videos.map(v =>
+        v.id === videoId
+          ? { 
+              ...v, 
+              isLiked: true, 
+              likes_count: (v.likes_count || 0) + 1
+            }
+          : v
+      ));
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('✅ PROFILE: LIKE OPERATION COMPLETE');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  } catch (error) {
+    console.error('❌ Error toggling like:', error);
+  }
+};
 
   const handleVideoPress = (video: VideoPost, index: number, videoList: VideoPost[]) => {
     setSelectedVideo(video);
@@ -1155,7 +2027,9 @@ export default function ProfileScreen() {
             for (const videoId of selectedVideoIds) {
               const video = videos.find(v => v.id === videoId);
               if (video) {
-                await handleSaveVideo(video.video_url, video.id);
+                if (video.video_url) {
+  await handleSaveVideo(video.video_url, video.id, video.library_id);
+}
               }
             }
             setIsSelectMode(false);
@@ -1184,15 +2058,14 @@ export default function ProfileScreen() {
             for (const videoId of selectedVideoIds) {
               const video = videos.find(v => v.id === videoId);
               if (video) {
-                // Delete from Bunny.net
                 if (video.video_url) {
                   const bunnyVideoId = extractVideoId(video.video_url);
                   if (bunnyVideoId) {
-                    await deleteStreamVideo(bunnyVideoId);
+                    const isPremium = video.library_id === 597832;
+await deleteStreamVideo(bunnyVideoId, isPremium);
                   }
                 }
 
-                // Delete from database
                 await supabase
                   .from('videos')
                   .delete()
@@ -1258,12 +2131,33 @@ export default function ProfileScreen() {
   };
 
   const renderRequestCard = (request: any) => {
+    // 🔍 DEBUG - Check what data we're receiving
+  console.log('📋 Request Card Debug:', {
+    id: request.id,
+    description: request.description,
+    fulfillment_count: request.fulfillment_count,
+    type: typeof request.fulfillment_count,
+  });
     const expiresAt = new Date(request.expires_at);
-    const now = new Date();
-    const isExpired = expiresAt < now;
-    const timeRemaining = Math.max(0, expiresAt.getTime() - now.getTime());
+const now = new Date();
+const timeRemaining = Math.max(0, expiresAt.getTime() - now.getTime());
+// 🔧 FIX: Check status first, then time
+const isExpired = request.status === 'expired' || expiresAt < now;
+// 🔍 DEBUG
+console.log('📋 Request Card:', {
+  id: request.id,
+  status: request.status,
+  isExpired: isExpired,
+  timeLeft: timeRemaining
+});
     const hoursRemaining = Math.floor(timeRemaining / (1000 * 60 * 60));
     const minutesRemaining = Math.floor((timeRemaining % (1000 * 60 * 60)) / (1000 * 60));
+  // 🔧 ADD THESE LINES:
+  const hasFulfillments = (request.fulfillment_count || 0) > 0;
+  const canDelete = !hasFulfillments || isExpired; // Can delete if: no fulfillments OR expired
+    const requestDescriptionText = request.description;
+    const requestLocationText = request.location_name;
+    const hoursRemainingText = `${hoursRemaining}h ${minutesRemaining}m remaining`;
 
     return (
       <Pressable
@@ -1275,7 +2169,7 @@ export default function ProfileScreen() {
         onPress={() => handleViewFulfillments(request)}
       >
         <View style={styles.requestHeader}>
-          <Text style={styles.requestDescription}>{request.description}</Text>
+          <Text style={styles.requestDescription}>{requestDescriptionText}</Text>
           {isExpired ? (
             <View style={styles.expiredBadge}>
               <Text style={styles.expiredText}>Expired</Text>
@@ -1294,7 +2188,7 @@ export default function ProfileScreen() {
             size={16}
             color={colors.textSecondary}
           />
-          <Text style={styles.requestLocation}>{request.location_name}</Text>
+          <Text style={styles.requestLocation}>{requestLocationText}</Text>
         </View>
 
         {!isExpired && (
@@ -1305,87 +2199,55 @@ export default function ProfileScreen() {
               size={16}
               color={colors.textSecondary}
             />
-            <Text style={styles.requestTime}>
-              {hoursRemaining}h {minutesRemaining}m remaining
-            </Text>
+            <Text style={styles.requestTime}>{hoursRemainingText}</Text>
           </View>
         )}
 
-        <View style={styles.requestActions}>
-          {!isExpired && (
-            <>
-              <Pressable
-                style={({ pressed }) => [
-                  styles.requestActionButton,
-                  pressed && styles.actionButtonPressed,
-                ]}
-                onPress={() => handleEditRequest(request)}
-              >
-                <IconSymbol
-                  ios_icon_name="pencil"
-                  android_material_icon_name="edit"
-                  size={20}
-                  color={colors.primary}
-                />
-                <Text style={styles.requestActionText}>Edit</Text>
-              </Pressable>
+<View style={styles.requestActions}>
+  {/* View Videos - ALWAYS show */}
+  <Pressable
+    style={({ pressed }) => [
+      styles.requestActionButton,
+      pressed && styles.actionButtonPressed,
+    ]}
+    onPress={() => handleViewFulfillments(request)}
+  >
+    <IconSymbol
+      ios_icon_name="play.circle.fill"
+      android_material_icon_name="play-circle-filled"
+      size={20}
+      color={colors.primary}
+    />
+    <Text style={styles.requestActionText}>View Videos</Text>
+  </Pressable>
 
-              <Pressable
-                style={({ pressed }) => [
-                  styles.requestActionButton,
-                  pressed && styles.actionButtonPressed,
-                ]}
-                onPress={() => handleViewFulfillments(request)}
-              >
-                <IconSymbol
-                  ios_icon_name="play.circle.fill"
-                  android_material_icon_name="play-circle-filled"
-                  size={20}
-                  color={colors.primary}
-                />
-                <Text style={styles.requestActionText}>View Videos</Text>
-              </Pressable>
-            </>
-          )}
-
-          {isExpired && (
-            <Pressable
-              style={({ pressed }) => [
-                styles.requestActionButton,
-                pressed && styles.actionButtonPressed,
-              ]}
-              onPress={() => handleRepostRequest(request)}
-            >
-              <IconSymbol
-                ios_icon_name="arrow.clockwise"
-                android_material_icon_name="refresh"
-                size={20}
-                color={colors.primary}
-              />
-              <Text style={styles.requestActionText}>Repost</Text>
-            </Pressable>
-          )}
-
-          <Pressable
-            style={({ pressed }) => [
-              styles.requestActionButton,
-              pressed && styles.actionButtonPressed,
-            ]}
-            onPress={() => handleDeleteRequest(request.id)}
-          >
-            <IconSymbol
-              ios_icon_name="trash.fill"
-              android_material_icon_name="delete"
-              size={20}
-              color="#F44336"
-            />
-            <Text style={[styles.requestActionText, { color: '#F44336' }]}>Delete</Text>
-          </Pressable>
-        </View>
-      </Pressable>
-    );
-  };
-
+{/* Delete button - greyed out if has fulfillments */}
+<Pressable
+  style={({ pressed }) => [
+    styles.requestActionButton,
+    !canDelete && styles.requestActionButtonDisabled,
+    pressed && canDelete && styles.actionButtonPressed,
+  ]}
+  onPress={() => canDelete && handleDeleteRequest(request.id)}
+  disabled={!canDelete}
+>
+  <IconSymbol
+    ios_icon_name="trash.fill"
+    android_material_icon_name="delete"
+    size={20}
+    color={canDelete ? "#F44336" : "#CCCCCC"}
+  />
+  <Text style={[
+    styles.requestActionText, 
+    { color: canDelete ? '#F44336' : '#CCCCCC' }
+  ]}>
+    Delete
+  </Text>
+</Pressable>
+      </View>
+    </Pressable>
+  );
+};
   const renderRightActions = (
     progress: Animated.AnimatedInterpolation<number>,
     dragX: Animated.AnimatedInterpolation<number>,
@@ -1426,7 +2288,7 @@ export default function ProfileScreen() {
 
   const getExpiryInfo = (createdAt: string) => {
     const created = new Date(createdAt);
-    const expiresAt = new Date(created.getTime() + 3 * 24 * 60 * 60 * 1000); // 3 days
+    const expiresAt = new Date(created.getTime() + 3 * 24 * 60 * 60 * 1000);
     const now = new Date();
     const timeRemaining = expiresAt.getTime() - now.getTime();
     const daysRemaining = Math.ceil(timeRemaining / (1000 * 60 * 60 * 24));
@@ -1440,7 +2302,10 @@ export default function ProfileScreen() {
 
   const renderVideoCard = (video: VideoPost, index: number) => {
     const isSelected = selectedVideoIds.has(video.id);
-    const expiryInfo = getExpiryInfo(video.created_at);
+    const expiryInfo = getExpiryInfo(video.created_at || new Date().toISOString());
+    const likesCountText = formatCount(video.likes_count || 0);
+    const commentsCountText = formatCount(video.comments_count || 0);
+    const sharesCountText = formatCount(video.shares_count || 0);
 
     return (
       <Pressable
@@ -1480,7 +2345,7 @@ export default function ProfileScreen() {
         )}
 
         <Image
-          source={{ uri: getVideoThumbnailUrl(video.video_url) }}
+          source={{ uri: getVideoThumbnailUrl(video.video_url || '', video.library_id) }}
           style={styles.videoThumbnail}
         />
 
@@ -1493,7 +2358,7 @@ export default function ProfileScreen() {
                 size={16}
                 color={colors.textSecondary}
               />
-              <Text style={styles.videoStatText}>{formatCount(video.likes_count || 0)}</Text>
+              <Text style={styles.videoStatText}>{likesCountText}</Text>
             </View>
 
             <View style={styles.videoStat}>
@@ -1503,7 +2368,7 @@ export default function ProfileScreen() {
                 size={16}
                 color={colors.textSecondary}
               />
-              <Text style={styles.videoStatText}>{formatCount(video.comments_count || 0)}</Text>
+              <Text style={styles.videoStatText}>{commentsCountText}</Text>
             </View>
 
             <View style={styles.videoStat}>
@@ -1513,7 +2378,7 @@ export default function ProfileScreen() {
                 size={16}
                 color={colors.textSecondary}
               />
-              <Text style={styles.videoStatText}>{formatCount(video.shares_count || 0)}</Text>
+              <Text style={styles.videoStatText}>{sharesCountText}</Text>
             </View>
           </View>
 
@@ -1527,7 +2392,7 @@ export default function ProfileScreen() {
                 styles.videoActionButton,
                 pressed && styles.actionButtonPressed,
               ]}
-              onPress={() => handleSaveVideo(video.video_url, video.id)}
+              onPress={() => video.video_url && handleSaveVideo(video.video_url, video.id, video.library_id)}
             >
               <IconSymbol
                 ios_icon_name="arrow.down.circle.fill"
@@ -1633,11 +2498,26 @@ export default function ProfileScreen() {
               </View>
             )}
 
-            <ScrollView contentContainerStyle={styles.videosGrid}>
-              {videos.map((video, index) => renderVideoCard(video, index))}
-            </ScrollView>
+            <FlatList
+      data={videos}
+      renderItem={({ item, index }) => renderVideoCard(item, index)}
+      keyExtractor={(item) => item.id}
+      numColumns={3}
+      contentContainerStyle={styles.videosGrid}
+      onEndReached={handleLoadMoreVideos}
+      onEndReachedThreshold={0.5}
+      ListFooterComponent={
+        loadingMoreVideos ? (
+          <View style={styles.loadingMoreVideos}>
+            <ActivityIndicator size="small" color={colors.primary} />
+            <Text style={styles.loadingMoreText}>Loading more...</Text>
           </View>
-        );
+        ) : null
+      }
+      columnWrapperStyle={{ gap: 12 }}
+    />
+  </View>
+);
 
       case 'pending':
         if (pendingUploads.length === 0) {
@@ -1656,132 +2536,158 @@ export default function ProfileScreen() {
 
         return (
           <ScrollView contentContainerStyle={styles.pendingContainer}>
-            {pendingUploads.map((upload) => (
-              <Pressable
-                key={upload.id}
-                style={({ pressed }) => [
-                  styles.pendingCard,
-                  pressed && styles.cardPressed,
-                ]}
-              >
-                <View style={styles.pendingHeader}>
-                  <Text style={styles.pendingCaption}>{upload.caption || 'Untitled'}</Text>
-                  <View
-                    style={[
-                      styles.statusBadge,
-                      { backgroundColor: getModerationStatusColor(upload.status) },
-                    ]}
-                  >
-                    <Text style={styles.statusText}>{upload.status}</Text>
-                  </View>
-                </View>
+{pendingUploads.map((upload) => {
+  const uploadCaptionText = upload.caption || 'Untitled';
+  
+  // Determine status text based on upload status
+  let uploadStatusText = 'Processing...';
+  if (upload.status === 'uploading') {
+    uploadStatusText = 'Uploading...';
+  } else if (upload.status === 'processing') {
+    uploadStatusText = 'Processing video...';
+  } else if (upload.status === 'moderating') {
+    uploadStatusText = 'Checking content...';
+  }
+  
+  const uploadDateText = formatDate(upload.created_at);
+  const uploadProgress = upload.upload_progress || 0;
+  return (
+    <Pressable
+      key={upload.id}
+      style={({ pressed }) => [
+        styles.pendingCard,
+        pressed && styles.cardPressed,
+      ]}
+    >
+      <View style={styles.pendingHeader}>
+        <Text style={styles.pendingCaption}>{uploadCaptionText}</Text>
+        {/* Progress bar */}
+<View style={styles.progressBarContainer}>
+  <View style={[styles.progressBar, { width: `${uploadProgress}%` }]} />
+</View>
+<Text style={styles.progressText}>{uploadProgress}%</Text>
+        <View
+          style={[
+            styles.statusBadge,
+            { backgroundColor: '#FFA500' }, // Orange for processing
+          ]}
+        >
+          <Text style={styles.statusText}>{uploadStatusText}</Text>
+        </View>
+      </View>
 
-                <Text style={styles.pendingDate}>{formatDate(upload.created_at)}</Text>
+      <Text style={styles.pendingDate}>{uploadDateText}</Text>
 
-                {upload.status === 'uploading' && upload.upload_progress !== undefined && (
-                  <View style={styles.progressContainer}>
-                    <View style={styles.progressBar}>
-                      <View
-                        style={[
-                          styles.progressFill,
-                          { width: `${upload.upload_progress}%` },
-                        ]}
-                      />
-                    </View>
-                    <Text style={styles.progressText}>{upload.upload_progress}%</Text>
-                  </View>
-                )}
-
-                {upload.status === 'uploading' && (
-                  <Pressable
-                    style={({ pressed }) => [
-                      styles.cancelButton,
-                      pressed && styles.actionButtonPressed,
-                    ]}
-                    onPress={() => handleCancelPendingUpload(upload.id)}
-                  >
-                    <Text style={styles.cancelButtonText}>Cancel Upload</Text>
-                  </Pressable>
-                )}
-              </Pressable>
-            ))}
+      {/* Show animated processing indicator */}
+      {upload.moderation_status === 'pending' && (
+        <View style={styles.processingContainer}>
+          <ActivityIndicator size="small" color={colors.primary} />
+          <Text style={styles.processingText}>Checking video content...</Text>
+        </View>
+      )}
+    </Pressable>
+  );
+})}
           </ScrollView>
         );
 
       case 'liked':
-        if (likedVideos.length === 0) {
+  if (likedVideos.length === 0) {
+    return (
+      <View style={styles.emptyContainer}>
+        <IconSymbol
+          ios_icon_name="heart.slash"
+          android_material_icon_name="heart-broken"
+          size={64}
+          color={colors.textSecondary}
+        />
+        <Text style={styles.emptyText}>No liked videos</Text>
+        <Text style={styles.emptySubtext}>Videos you like will appear here</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.videosContainer}>
+      <FlatList
+        data={likedVideos}
+        renderItem={({ item: video, index }) => {
+          const likesCountText = formatCount(video.likes_count || 0);
+          const commentsCountText = formatCount(video.comments_count || 0);
+          const sharesCountText = formatCount(video.shares_count || 0);
+
           return (
-            <View style={styles.emptyContainer}>
-              <IconSymbol
-                ios_icon_name="heart.slash"
-                android_material_icon_name="heart-broken"
-                size={64}
-                color={colors.textSecondary}
+            <Pressable
+              key={video.id}
+              style={({ pressed }) => [
+                styles.videoCard,
+                pressed && styles.cardPressed,
+              ]}
+              onPress={() => handleVideoPress(video, index, likedVideos)}
+            >
+              <Image
+                source={{ uri: getVideoThumbnailUrl(video.video_url || '', video.library_id) }}
+                style={styles.videoThumbnail}
               />
-              <Text style={styles.emptyText}>No liked videos</Text>
-              <Text style={styles.emptySubtext}>Videos you like will appear here</Text>
-            </View>
-          );
-        }
 
-        return (
-          <ScrollView contentContainerStyle={styles.videosGrid}>
-            {likedVideos.map((video, index) => (
-              <Pressable
-                key={video.id}
-                style={({ pressed }) => [
-                  styles.videoCard,
-                  pressed && styles.cardPressed,
-                ]}
-                onPress={() => handleVideoPress(video, index, likedVideos)}
-              >
-                <Image
-                  source={{ uri: getVideoThumbnailUrl(video.video_url) }}
-                  style={styles.videoThumbnail}
-                />
-
-                <View style={styles.videoCardInfo}>
-                  <View style={styles.videoStats}>
-                    <View style={styles.videoStat}>
-                      <IconSymbol
-                        ios_icon_name="heart.fill"
-                        android_material_icon_name="favorite"
-                        size={16}
-                        color={colors.textSecondary}
-                      />
-                      <Text style={styles.videoStatText}>{formatCount(video.likes_count || 0)}</Text>
-                    </View>
-
-                    <View style={styles.videoStat}>
-                      <IconSymbol
-                        ios_icon_name="bubble.left.fill"
-                        android_material_icon_name="chat-bubble"
-                        size={16}
-                        color={colors.textSecondary}
-                      />
-                      <Text style={styles.videoStatText}>{formatCount(video.comments_count || 0)}</Text>
-                    </View>
+              <View style={styles.videoCardInfo}>
+                <View style={styles.videoStats}>
+                  <View style={styles.videoStat}>
+                    <IconSymbol
+                      ios_icon_name="heart.fill"
+                      android_material_icon_name="favorite"
+                      size={16}
+                      color={colors.textSecondary}
+                    />
+                    <Text style={styles.videoStatText}>{likesCountText}</Text>
                   </View>
 
-                  <Pressable
-                    style={({ pressed }) => [
-                      styles.unlikeButton,
-                      pressed && styles.actionButtonPressed,
-                    ]}
-                    onPress={() => handleUnlikeVideo(video.id)}
-                  >
+                  <View style={styles.videoStat}>
                     <IconSymbol
-                      ios_icon_name="heart.slash.fill"
-                      android_material_icon_name="heart-broken"
-                      size={24}
-                      color="#F44336"
+                      ios_icon_name="bubble.left.fill"
+                      android_material_icon_name="chat-bubble"
+                      size={16}
+                      color={colors.textSecondary}
                     />
-                  </Pressable>
+                    <Text style={styles.videoStatText}>{commentsCountText}</Text>
+                  </View>
+
+                  <View style={styles.videoStat}>
+                    <IconSymbol
+                      ios_icon_name="arrowshape.turn.up.right.fill"
+                      android_material_icon_name="share"
+                      size={16}
+                      color={colors.textSecondary}
+                    />
+                    <Text style={styles.videoStatText}>{sharesCountText}</Text>
+                  </View>
                 </View>
-              </Pressable>
-            ))}
-          </ScrollView>
-        );
+
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.unlikeButton,
+                    pressed && styles.actionButtonPressed,
+                  ]}
+                  onPress={() => handleUnlikeVideo(video.id)}
+                >
+                  <IconSymbol
+                    ios_icon_name="heart.slash.fill"
+                    android_material_icon_name="heart-broken"
+                    size={24}
+                    color="#F44336"
+                  />
+                </Pressable>
+              </View>
+            </Pressable>
+          );
+        }}
+        keyExtractor={(item) => item.id}
+        numColumns={3}
+        contentContainerStyle={styles.videosGrid}
+        columnWrapperStyle={{ gap: 12 }}
+      />
+    </View>
+  );
 
       case 'requests':
         if (myRequests.length === 0) {
@@ -1794,7 +2700,10 @@ export default function ProfileScreen() {
                 color={colors.textSecondary}
               />
               <Text style={styles.emptyText}>No requests yet</Text>
-              <Text style={styles.emptySubtext}>Create a request to see it here</Text>
+              <Text style={styles.emptySubtext}>
+                Looking for a place but no live video yet?{'\n'}
+                Double-tap the map to request one.
+              </Text>
             </View>
           );
         }
@@ -1832,41 +2741,47 @@ export default function ProfileScreen() {
 
             <GestureHandlerRootView style={{ flex: 1 }}>
               <ScrollView>
-                {notifications.map((notification) => (
-                  <Swipeable
-                    key={notification.id}
-                    ref={(ref) => (swipeableRefs.current[notification.id] = ref)}
-                    renderRightActions={(progress, dragX) =>
-                      renderRightActions(progress, dragX, notification.id)
-                    }
-                    overshootRight={false}
-                  >
-                    <Pressable
-                      style={({ pressed }) => [
-                        styles.notificationCard,
-                        !notification.is_read && styles.notificationUnread,
-                        pressed && styles.cardPressed,
-                      ]}
-                      onPress={() => handleNotificationPress(notification)}
-                    >
-                      <Pressable onPress={() => handleNotificationAvatarPress(notification)}>
-                        <Image
-                          source={{
-                            uri: notification.users?.avatar_url || 'https://via.placeholder.com/40',
-                          }}
-                          style={styles.notificationAvatar}
-                        />
-                      </Pressable>
+                {notifications.map((notification) => {
+                  const notificationMessageText = notification.message;
+                  const notificationTimeText = formatDate(notification.created_at);
 
-                      <View style={styles.notificationContent}>
-                        <Text style={styles.notificationMessage}>{notification.message}</Text>
-                        <Text style={styles.notificationTime}>
-                          {formatDate(notification.created_at)}
-                        </Text>
-                      </View>
-                    </Pressable>
-                  </Swipeable>
-                ))}
+                  return (
+                    <Swipeable
+                      key={notification.id}
+                      ref={(ref: Swipeable | null) => {
+  if (ref) {
+    swipeableRefs.current[notification.id] = ref;
+  }
+}}
+                      renderRightActions={(progress, dragX) =>
+                        renderRightActions(progress, dragX, notification.id)
+                      }
+                      overshootRight={false}
+                    >
+                      <Pressable
+                        style={({ pressed }) => [
+                          styles.notificationCard,
+                          !notification.is_read && styles.notificationUnread,
+                          pressed && styles.cardPressed,
+                        ]}
+                        onPress={() => handleNotificationPress(notification)}
+                      >
+                        <Pressable onPress={() => handleNotificationAvatarPress(notification)}>
+  <PremiumAvatar
+    avatarUrl={notification.users?.avatar_url}
+    size={40}
+    isPremium={notification.users?.is_premium || false}
+  />
+</Pressable>
+
+                        <View style={styles.notificationContent}>
+                          <Text style={styles.notificationMessage}>{notificationMessageText}</Text>
+                          <Text style={styles.notificationTime}>{notificationTimeText}</Text>
+                        </View>
+                      </Pressable>
+                    </Swipeable>
+                  );
+                })}
               </ScrollView>
             </GestureHandlerRootView>
           </View>
@@ -1887,98 +2802,136 @@ export default function ProfileScreen() {
     );
   }
 
+  const displayNameText = `@${profile.username}`;
+  const usernameText = `@${profile.username}`;
+  const bioText = profile.bio || '';
+  const locationText = profile.location || '';
+  const videosCountText = formatCount(profile.videos_count || 0);
+  const followersCountText = formatCount(profile.followers_count || 0);
+  const followingCountText = formatCount(profile.following_count || 0);
+  const likedCountText = formatCount(likedVideos.length);
+  const unreadBadgeText = unreadNotificationsCount > 99 ? '99+' : unreadNotificationsCount.toString();
+
   return (
     <SafeAreaView style={styles.container}>
-      <LinearGradient colors={[colors.background, colors.background]} style={styles.gradient}>
+  {/* Coin Animation */}
+  {showCoinAnimation && (
+    <View style={{ position: 'absolute', top: 100, left: 0, right: 0, zIndex: 1000 }}>
+      <CoinAnimation 
+        amount={coinAnimationAmount}
+        onComplete={() => setShowCoinAnimation(false)}
+      />
+    </View>
+  )}
+  
+  <LinearGradient colors={[colors.background, colors.background]} style={styles.gradient}>
         <ScrollView>
-          {/* Profile Header */}
+          {/* Profile Header - Horizontal Layout */}
           <View style={styles.header}>
-            <Pressable onPress={handleChangeAvatar}>
-              <Image
-                source={{
-                  uri: profile.avatar_url || 'https://via.placeholder.com/100',
-                }}
-                style={styles.avatar}
-              />
-              <View style={styles.avatarEditIcon}>
-                <IconSymbol
-                  ios_icon_name="camera.fill"
-                  android_material_icon_name="camera"
-                  size={16}
-                  color="#FFF"
-                />
-              </View>
-            </Pressable>
 
-            <Text style={styles.displayName}>{profile.display_name || profile.username}</Text>
-            <Text style={styles.username}>@{profile.username}</Text>
+            {/* 🪙 COIN BALANCE - Top Right Corner */}
+<Pressable 
+  onPress={() => router.push('/coin-history')} 
+  style={styles.coinBalanceTopRight}
+>
+  <CoinBalance 
+    coins={coins} 
+    loading={coinsLoading}
+    size="small"
+  />
+</Pressable>
 
-            {profile.bio && <Text style={styles.bio}>{profile.bio}</Text>}
+<View style={styles.profileRow}>
+  {/* Avatar on the left */}
+  <View>
+    <Pressable onPress={handleChangeAvatar}>
+      <PremiumAvatar
+        avatarUrl={profile.avatar_url}
+        size={80}
+        isPremium={profile.is_premium}
+      />
+    </Pressable>
 
-            {profile.location && (
-              <View style={styles.locationContainer}>
-                <IconSymbol
-                  ios_icon_name="location.fill"
-                  android_material_icon_name="location-on"
-                  size={16}
-                  color={colors.textSecondary}
-                />
-                <Text style={styles.location}>{profile.location}</Text>
-              </View>
-            )}
+    {/* Settings Icon on Avatar */}
+    <Pressable 
+      onPress={() => router.push('/settings')}
+      style={styles.avatarEditIcon}
+    >
+      <IconSymbol
+        ios_icon_name="gearshape.fill"
+        android_material_icon_name="settings"
+        size={16}
+        color="#333"
+      />
+    </Pressable>
+  </View>
 
-            {/* Stats */}
-            <View style={styles.stats}>
-              <Pressable style={styles.stat} onPress={handleNavigateToVideosTab}>
-                <Text style={styles.statValue}>{formatCount(profile.videos_count || 0)}</Text>
-                <Text style={styles.statLabel}>Videos</Text>
-              </Pressable>
-
-              <Pressable
-                style={styles.stat}
-                onPress={() => handleNavigateToFollowersList('followers')}
-              >
-                <Text style={styles.statValue}>{formatCount(profile.followers_count || 0)}</Text>
-                <Text style={styles.statLabel}>Followers</Text>
-              </Pressable>
-
-              <Pressable
-                style={styles.stat}
-                onPress={() => handleNavigateToFollowersList('following')}
-              >
-                <Text style={styles.statValue}>{formatCount(profile.following_count || 0)}</Text>
-                <Text style={styles.statLabel}>Following</Text>
-              </Pressable>
-
-              <Pressable style={styles.stat} onPress={handleNavigateToLikedTab}>
-                <Text style={styles.statValue}>{formatCount(likedVideos.length)}</Text>
-                <Text style={styles.statLabel}>Likes</Text>
-              </Pressable>
+              {/* Info on the right */}
+              <View style={styles.profileInfo}>
+  <Text style={styles.displayName} numberOfLines={1} ellipsizeMode="tail">
+    {displayNameText}
+  </Text>
+  {bioText ? <Text style={styles.bio}>{bioText}</Text> : null}
+  {locationText ? (
+    <View style={styles.locationContainer}>
+      <IconSymbol
+        ios_icon_name="location.fill"
+        android_material_icon_name="location-on"
+        size={14}
+        color={colors.textSecondary}
+      />
+      <Text style={styles.location}>{locationText}</Text>
+    </View>
+  ) : null}
+</View>
             </View>
 
-            {/* Action Buttons */}
-            <View style={styles.actionButtons}>
-              <Pressable style={styles.editButton} onPress={handleEditProfile}>
-                <IconSymbol
-                  ios_icon_name="pencil"
-                  android_material_icon_name="edit"
-                  size={20}
-                  color={colors.primary}
-                />
-                <Text style={styles.editButtonText}>Edit Profile</Text>
-              </Pressable>
+{/* Stats */}
+<View style={styles.stats}>
+  {/* Videos - Lifetime Count */}
+  <View style={styles.stat}>
+    <Text style={styles.statValue}>
+      {formatCount(profile.lifetime_videos_count || 0)}
+    </Text>
+    <Text style={styles.statLabel}>Videos</Text>
+  </View>
 
-              <Pressable style={styles.signOutButton} onPress={handleSignOut}>
-                <IconSymbol
-                  ios_icon_name="arrow.right.square"
-                  android_material_icon_name="logout"
-                  size={20}
-                  color="#F44336"
-                />
-              </Pressable>
-            </View>
-          </View>
+  {/* Views - Lifetime Count */}
+  <View style={styles.stat}>
+    <Text style={styles.statValue}>
+      {formatCount(profile.lifetime_views_count || 0)}
+    </Text>
+    <Text style={styles.statLabel}>Views</Text>
+  </View>
 
+  {/* Likes - Lifetime Count */}
+  <View style={styles.stat}>
+    <Text style={styles.statValue}>
+      {formatCount(profile.lifetime_likes_count || 0)}
+    </Text>
+    <Text style={styles.statLabel}>Likes</Text>
+  </View>
+
+  {/* Followers - Tappable */}
+  <Pressable
+    style={styles.stat}
+    onPress={() => handleNavigateToFollowersList('followers')}
+  >
+    <Text style={styles.statValue}>{followersCountText}</Text>
+    <Text style={styles.statLabel}>Followers</Text>
+  </Pressable>
+
+  {/* Following - Tappable */}
+  <Pressable
+    style={styles.stat}
+    onPress={() => handleNavigateToFollowersList('following')}
+  >
+    <Text style={styles.statValue}>{followingCountText}</Text>
+    <Text style={styles.statLabel}>Following</Text>
+  </Pressable>
+</View>
+
+</View>
           {/* Tabs */}
           <View style={styles.tabs}>
             <Pressable
@@ -2074,9 +3027,7 @@ export default function ProfileScreen() {
                 />
                 {unreadNotificationsCount > 0 && (
                   <View style={styles.notificationBadge}>
-                    <Text style={styles.notificationBadgeText}>
-                      {unreadNotificationsCount > 99 ? '99+' : unreadNotificationsCount}
-                    </Text>
+                    <Text style={styles.notificationBadgeText}>{unreadBadgeText}</Text>
                   </View>
                 )}
               </View>
@@ -2105,7 +3056,20 @@ export default function ProfileScreen() {
               </Pressable>
             </View>
           )}
-
+{/* ⏳ ADD THE BANNER HERE */}
+{activeTab === 'videos' && videos.length > 0 && (
+  <View style={styles.videoDeletionBanner}>
+    <IconSymbol
+      ios_icon_name="clock.fill"
+      android_material_icon_name="schedule"
+      size={20}
+      color="#FF9800"
+    />
+    <Text style={styles.videoDeletionText}>
+      ⏳ All videos auto-delete after 3 days. Download them now to save your precious memories forever!
+    </Text>
+  </View>
+)}
           {/* Content */}
           {renderContent()}
         </ScrollView>
@@ -2133,18 +3097,7 @@ export default function ProfileScreen() {
               </View>
 
               <ScrollView style={styles.modalContent}>
-                <View style={styles.inputGroup}>
-                  <Text style={styles.inputLabel}>Display Name</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={editedProfile.display_name || ''}
-                    onChangeText={(text) =>
-                      setEditedProfile({ ...editedProfile, display_name: text })
-                    }
-                    placeholder="Enter display name"
-                    placeholderTextColor={colors.textSecondary}
-                  />
-                </View>
+                {/* Display Name field removed - using username only */}
 
                 <View style={styles.inputGroup}>
                   <Text style={styles.inputLabel}>Bio</Text>
@@ -2177,33 +3130,6 @@ export default function ProfileScreen() {
                     placeholder="Enter location"
                     placeholderTextColor={colors.textSecondary}
                   />
-                </View>
-
-                <View style={styles.inputGroup}>
-                  <Text style={styles.inputLabel}>Interests</Text>
-                  <View style={styles.categoriesContainer}>
-                    {AVAILABLE_CATEGORIES.map((category) => (
-                      <Pressable
-                        key={category}
-                        style={[
-                          styles.categoryChip,
-                          (editedProfile.categories || []).includes(category) &&
-                            styles.categoryChipSelected,
-                        ]}
-                        onPress={() => toggleCategory(category)}
-                      >
-                        <Text
-                          style={[
-                            styles.categoryChipText,
-                            (editedProfile.categories || []).includes(category) &&
-                              styles.categoryChipTextSelected,
-                          ]}
-                        >
-                          {category}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
                 </View>
               </ScrollView>
             </KeyboardAvoidingView>
@@ -2238,6 +3164,17 @@ export default function ProfileScreen() {
                       onLike={handleLike}
                       userLocation={userLocation}
                       hideUnlikeButton={activeTab !== 'liked'}
+                      onAvatarPress={(userId) => {
+                        setVideoModalVisible(false);
+                        setTimeout(() => {
+                          router.push({
+                            pathname: '/user-profile',
+                            params: { userId },
+                          });
+                          setSelectedVideo(null);
+                          setCurrentVideoList([]);
+                        }, 100);
+                      }}
                     />
                   </View>
                 )}
@@ -2262,6 +3199,12 @@ export default function ProfileScreen() {
             )}
           </SafeAreaView>
         </Modal>
+
+        {/* 🪙 DAILY BONUS POPUP - ADDED */}
+        <DailyBonusPopup
+          visible={showDailyBonus}
+          onClose={() => setShowDailyBonus(false)}
+        />
       </LinearGradient>
     </SafeAreaView>
   );
@@ -2272,6 +3215,13 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
+  settingsIcon: {
+    position: 'absolute',
+    top: 0,
+    right: 20,
+    zIndex: 10,
+    padding: 8,
+  },
   gradient: {
     flex: 1,
   },
@@ -2281,14 +3231,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   header: {
-    alignItems: 'center',
-    padding: 20,
-    paddingTop: 10,
-  },
+  padding: 20,
+  paddingTop: 10,
+  position: 'relative', // ← ADD: Makes absolute positioning work properly
+},
+  profileRow: {
+  flexDirection: 'row',
+  alignItems: 'flex-start',
+  marginBottom: 16,
+  paddingRight: 100, // ← ADD: Reserve space for coin badge
+},
   avatar: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     borderWidth: 3,
     borderColor: colors.primary,
   },
@@ -2297,85 +3253,68 @@ const styles = StyleSheet.create({
     bottom: 0,
     right: 0,
     backgroundColor: colors.primary,
-    borderRadius: 15,
-    width: 30,
-    height: 30,
+    borderRadius: 12,
+    width: 24,
+    height: 24,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  displayName: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: colors.text,
-    marginTop: 12,
-  },
-  username: {
-    fontSize: 16,
-    color: colors.textSecondary,
-    marginTop: 4,
-  },
+  profileInfo: {
+  flex: 1,
+  marginLeft: 16,
+  marginRight: 12, // ← ADD: Gap between name and coin badge
+  minWidth: 0, // ← ADD: Allow flex shrinking
+  justifyContent: 'flex-start',
+},
+displayName: {
+  fontSize: 20,
+  fontWeight: 'bold',
+  color: colors.text,
+  marginBottom: 2,
+  flexShrink: 1, // ← ADD: Allow text to shrink
+},
+username: {
+  fontSize: 14,
+  color: colors.textSecondary,
+  marginBottom: 6,
+  flexShrink: 1, // ← ADD: Allow text to shrink
+},
   bio: {
-    fontSize: 14,
+    fontSize: 13,
     color: colors.text,
-    textAlign: 'center',
-    marginTop: 12,
-    paddingHorizontal: 20,
+    lineHeight: 18,
+    marginBottom: 6,
   },
   locationContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 8,
   },
   location: {
-    fontSize: 14,
+    fontSize: 12,
     color: colors.textSecondary,
     marginLeft: 4,
   },
   stats: {
     flexDirection: 'row',
+    flexWrap: 'wrap',  // ← ADD THIS
     justifyContent: 'space-around',
     width: '100%',
-    marginTop: 20,
-    paddingHorizontal: 20,
+    marginBottom: 20,
+    paddingHorizontal: 10,
+    rowGap: 12,
   },
   stat: {
     alignItems: 'center',
   },
   statValue: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: 'bold',
     color: colors.text,
   },
   statLabel: {
-    fontSize: 12,
+    fontSize: 11,
     color: colors.textSecondary,
-    marginTop: 4,
-  },
-  actionButtons: {
-    flexDirection: 'row',
-    marginTop: 20,
-    gap: 12,
-  },
-  editButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.surface,
-    paddingHorizontal: 24,
-    paddingVertical: 10,
-    borderRadius: 20,
-    gap: 8,
-  },
-  editButtonText: {
-    color: colors.primary,
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  signOutButton: {
-    backgroundColor: colors.surface,
-    padding: 10,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
+    marginTop: 2,
   },
   tabs: {
     flexDirection: 'row',
@@ -2442,17 +3381,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     paddingVertical: 60,
+    paddingHorizontal: 20,
   },
   emptyText: {
     fontSize: 18,
     fontWeight: '600',
     color: colors.text,
     marginTop: 16,
+    textAlign: 'center',
   },
   emptySubtext: {
     fontSize: 14,
     color: colors.textSecondary,
     marginTop: 8,
+    textAlign: 'center',
+    lineHeight: 20,
   },
   videosContainer: {
     flex: 1,
@@ -2479,16 +3422,14 @@ const styles = StyleSheet.create({
     padding: 8,
   },
   videosGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    padding: 12,
-    gap: 12,
-  },
+  padding: 12,
+  paddingBottom: 120,
+},
   videoCard: {
     width: CARD_WIDTH,
     backgroundColor: colors.surface,
     borderRadius: 12,
-    overflow: 'hidden',
+    overflow: 'hidden',/*  */
     marginBottom: 12,
     borderWidth: 2,
     borderColor: colors.border,
@@ -2496,7 +3437,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
-    elevation: 3,
+    elevation: 0,
   },
   videoCardSelected: {
     borderWidth: 3,
@@ -2578,6 +3519,7 @@ const styles = StyleSheet.create({
   },
   pendingContainer: {
     padding: 16,
+    paddingBottom: 120,  // ← ADD THIS
   },
   pendingCard: {
     backgroundColor: colors.surface,
@@ -2590,7 +3532,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
-    elevation: 3,
+    elevation: 0,
   },
   pendingHeader: {
     flexDirection: 'row',
@@ -2623,36 +3565,14 @@ const styles = StyleSheet.create({
   progressContainer: {
     marginBottom: 12,
   },
-  progressBar: {
-    height: 8,
-    backgroundColor: colors.border,
-    borderRadius: 4,
-    overflow: 'hidden',
-    marginBottom: 4,
-  },
   progressFill: {
     height: '100%',
     backgroundColor: colors.primary,
     borderRadius: 4,
   },
-  progressText: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    textAlign: 'right',
-  },
-  cancelButton: {
-    backgroundColor: '#F44336',
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  cancelButtonText: {
-    color: '#FFF',
-    fontSize: 14,
-    fontWeight: '600',
-  },
   requestsContainer: {
     padding: 16,
+    paddingBottom: 120,
   },
   requestCard: {
     backgroundColor: colors.surface,
@@ -2665,7 +3585,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
-    elevation: 3,
+    elevation: 0,
   },
   requestHeader: {
     flexDirection: 'row',
@@ -2722,19 +3642,23 @@ const styles = StyleSheet.create({
     gap: 16,
     marginTop: 12,
   },
-  requestActionButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 4,
-  },
-  requestActionText: {
-    fontSize: 14,
-    color: colors.primary,
-    fontWeight: '600',
+requestActionButton: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 6,
+  paddingVertical: 4,
+},
+requestActionButtonDisabled: {
+  opacity: 0.4,
+},
+requestActionText: {
+  fontSize: 14,
+  color: colors.primary,
+  fontWeight: '600',
   },
   notificationsContainer: {
     flex: 1,
+    paddingBottom: 80,
   },
   notificationsHeader: {
     flexDirection: 'row',
@@ -2764,12 +3688,7 @@ const styles = StyleSheet.create({
   notificationUnread: {
     backgroundColor: colors.background,
   },
-  notificationAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    marginRight: 12,
-  },
+  // Notification avatar style removed - now handled by PremiumAvatar component
   notificationContent: {
     flex: 1,
   },
@@ -2894,4 +3813,72 @@ const styles = StyleSheet.create({
   videoModalItem: {
     height: Dimensions.get('window').height,
   },
+  processingContainer: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 8,
+  marginTop: 8,
+  paddingTop: 8,
+  borderTopWidth: 1,
+  borderTopColor: colors.border,
+},
+processingText: {
+  fontSize: 12,
+  color: colors.textSecondary,
+  fontStyle: 'italic',
+},
+progressBarContainer: {
+  height: 4,
+  backgroundColor: colors.border,
+  borderRadius: 2,
+  marginTop: 8,
+  overflow: 'hidden',
+},
+progressBar: {
+  height: '100%',
+  backgroundColor: colors.primary,
+},
+progressText: {
+  fontSize: 10,
+  color: colors.textSecondary,
+  marginTop: 4,
+  textAlign: 'right',
+},
+coinBalanceTopRight: {
+  position: 'absolute',
+  top: 10,
+  right: 16,
+  zIndex: 100, // ← Much higher to ensure it's on top
+  flexShrink: 0, // ← Prevent shrinking
+},
+videoDeletionBanner: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  backgroundColor: '#FFF3E0',
+  borderWidth: 1,
+  borderColor: '#FFB74D',
+  borderRadius: 12,
+  padding: 12,
+  marginHorizontal: 16,
+  marginTop: 12,
+  marginBottom: 8,
+  gap: 10,
+},
+videoDeletionText: {
+  flex: 1,
+  fontSize: 13,
+  color: '#E65100',
+  lineHeight: 18,
+  fontWeight: '500',
+},
+loadingMoreVideos: {
+  paddingVertical: 20,
+  alignItems: 'center',
+  width: '100%',
+},
+loadingMoreText: {
+  marginTop: 8,
+  fontSize: 12,
+  color: colors.textSecondary,
+},
 });

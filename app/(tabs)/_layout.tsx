@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef } from 'react';
 import { Stack, usePathname } from 'expo-router';
 import FloatingTabBar, { TabBarItem } from '@/components/FloatingTabBar';
@@ -42,26 +41,24 @@ export default function TabLayout() {
   const pathname = usePathname();
   const previousPathname = useRef(pathname);
 
+  const isExplorePage = pathname === '/' || pathname.includes('/(home)');
+  console.log('🔍 DEBUG - pathname:', pathname);
+  console.log('🔍 DEBUG - isExplorePage:', isExplorePage);
+
   useEffect(() => {
-    // Log navigation changes for debugging
     console.log('Navigation changed from:', previousPathname.current, 'to:', pathname);
 
-    // Detect when user navigates away from home/feed to map, profile, or request
-    const isLeavingFeed = 
-      previousPathname.current.includes('/(home)') && 
+    const isLeavingFeed =
+      previousPathname.current.includes('/(home)') &&
       (pathname.includes('/map') || pathname.includes('/profile') || pathname.includes('/request'));
 
     if (isLeavingFeed) {
       console.log('🎬 User navigated away from feed to:', pathname);
       console.log('🛑 Videos will be stopped by VideoPlayer isActive=false');
-      // Videos will be stopped automatically by VideoPlayer's isActive prop
-      // which is controlled by the FlatList's viewability detection
-      // The VideoPlayer now completely stops (pause + reset + mute) when isActive=false
     }
 
-    // Also detect navigation TO feed from other tabs
-    const isEnteringFeed = 
-      !previousPathname.current.includes('/(home)') && 
+    const isEnteringFeed =
+      !previousPathname.current.includes('/(home)') &&
       pathname.includes('/(home)');
 
     if (isEnteringFeed) {
@@ -75,13 +72,15 @@ export default function TabLayout() {
   return (
     <View style={styles.container}>
       <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="(home)" options={{ headerShown: false }} />
+        <Stack.Screen name="(home)" options={{ headerShown: false, freezeOnBlur: false }} />
         <Stack.Screen name="search" options={{ headerShown: false }} />
-        <Stack.Screen name="map" options={{ headerShown: false }} />
-        <Stack.Screen name="request" options={{ headerShown: false }} />
-        <Stack.Screen name="profile" options={{ headerShown: false }} />
+        <Stack.Screen name="map" options={{ headerShown: false, freezeOnBlur: false }} />
+        <Stack.Screen name="request" options={{ headerShown: false, freezeOnBlur: false }} />
+        <Stack.Screen name="profile" options={{ headerShown: false, freezeOnBlur: false }} />
+        <Stack.Screen name="settings" options={{ headerShown: false }} />
+        <Stack.Screen name="edit-profile" options={{ headerShown: false }} />
       </Stack>
-      <FloatingTabBar tabs={tabs} />
+      <FloatingTabBar tabs={tabs} isTransparent={isExplorePage} />
     </View>
   );
 }

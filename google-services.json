@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "41472168164",
+    "project_id": "popnow-8b279",
+    "storage_bucket": "popnow-8b279.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:41472168164:android:49555f50cf2673524edcf1",
+        "android_client_info": {
+          "package_name": "world.popnow.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCHiLhzuxs9xk1J7yTCxCOPLtXqBR9qhFk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

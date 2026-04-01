@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
@@ -10,6 +9,8 @@ import {
   Text,
   Pressable,
   ViewToken,
+  RefreshControl,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -17,6 +18,7 @@ import { supabase } from '@/lib/supabase';
 import { VideoPost } from '@/types/video';
 import VideoFeedItem from '@/components/VideoFeedItem';
 import * as Location from 'expo-location';
+import { useAdManager } from '@/hooks/useAdManager';
 import { router, useFocusEffect } from 'expo-router';
 import { colors } from '@/styles/commonStyles';
 import { IconSymbol } from '@/components/IconSymbol';
@@ -26,38 +28,152 @@ const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 export default function HomeScreen() {
   const [videos, setVideos] = useState<VideoPost[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [allContentLoaded, setAllContentLoaded] = useState(false);
+  const BATCH_SIZE = 8;
   const [activeIndex, setActiveIndex] = useState(0);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const flatListRef = useRef<FlatList>(null);
-  const viewedVideos = useRef<Set<string>>(new Set());
   const [isFocused, setIsFocused] = useState(true);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [isPremium, setIsPremium] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const seenVideoIds = useRef(new Set<string>());
+  const [newVideosCount, setNewVideosCount] = useState(0);
+  const newestVideoTime = useRef<string | null>(null);
+  const hasInitialized = useRef(false);
+  const focusInitialized = useRef(false);
 
-  useEffect(() => {
-    loadVideos();
-    getUserLocation();
-    getCurrentUser();
-  }, []);
+  const { trackVideoView } = useAdManager(isPremium);
 
-  // Handle screen focus/unfocus
-  useFocusEffect(
-    useCallback(() => {
-      console.log('Home screen focused');
-      setIsFocused(true);
-      
-      return () => {
-        console.log('Home screen unfocused, stopping all videos');
-        setIsFocused(false);
-        // Set activeIndex to -1 to stop all videos
-        setActiveIndex(-1);
-      };
-    }, [])
-  );
+  // ✅ ALL FUNCTIONS DEFINED BEFORE useEffect
+  const loadFeedBatch = async (isLoadingMore: boolean) => {
+    try {
+      if (isLoadingMore && loadingMore) return;
+      if (isLoadingMore && allContentLoaded) return;
+
+      if (isLoadingMore) {
+        setLoadingMore(true);
+      } else {
+        setLoading(true);
+      }
+
+      const { data: { user } } = await supabase.auth.getUser();
+
+      console.log(`📄 Loading batch of ${BATCH_SIZE} videos (excluding ${seenVideoIds.current.size} seen)...`);
+
+      const { data, error } = await supabase.rpc('get_feed_videos', {
+        p_user_id: user?.id || null,
+        p_count: BATCH_SIZE,
+        p_exclude_ids: Array.from(seenVideoIds.current),
+        p_lat: userLocation?.latitude || null,
+        p_lng: userLocation?.longitude || null,
+      });
+
+      if (error) {
+        console.error('Error loading feed:', error);
+        if (!isLoadingMore) {
+          Alert.alert('Error', 'Failed to load videos');
+        }
+        return;
+      }
+
+      const feedVideos = data || [];
+      console.log(`✅ Received ${feedVideos.length} videos`);
+
+      if (feedVideos.length < BATCH_SIZE) {
+        console.log('✅ All available videos loaded');
+        setAllContentLoaded(true);
+      }
+
+      if (feedVideos.length === 0 && !isLoadingMore) {
+        setVideos([]);
+        return;
+      }
+
+      feedVideos.forEach((v: any) => seenVideoIds.current.add(v.id));
+
+      if (feedVideos.length > 0 && !isLoadingMore) {
+        const newest = feedVideos.reduce((a: any, b: any) =>
+          new Date(a.created_at) > new Date(b.created_at) ? a : b
+        );
+        newestVideoTime.current = newest.created_at;
+      }
+
+      let likedVideoIds: string[] = [];
+      if (user) {
+        const { data: likes } = await supabase
+          .from('likes')
+          .select('video_id')
+          .eq('user_id', user.id);
+        likedVideoIds = likes?.map(like => like.video_id) || [];
+      }
+
+      const transformedVideos: VideoPost[] = feedVideos.map((video: any) => ({
+        id: video.id,
+        videoUrl: video.video_url,
+        video_url: video.video_url,
+        library_id: video.library_id,
+        thumbnailUrl: video.thumbnail_url,
+        caption: video.caption || '',
+        tags: video.tags || [],
+        latitude: video.location_latitude,
+        longitude: video.location_longitude,
+        locationName: video.location_name,
+        locationPrivacy: video.location_privacy,
+        users: {
+          id: video.user_id,
+          username: video.username || 'Unknown',
+          avatar_url: video.avatar_url,
+          is_premium: video.user_is_premium || false,
+        },
+        likes: video.likes_count || 0,
+        likes_count: video.likes_count || 0,
+        comments: video.comments_count || 0,
+        comments_count: video.comments_count || 0,
+        shares: video.shares_count || 0,
+        shares_count: video.shares_count || 0,
+        views: video.views_count || 0,
+        views_count: video.views_count || 0,
+        isLiked: likedVideoIds.includes(video.id),
+        createdAt: video.created_at,
+      }));
+
+      if (isLoadingMore) {
+        setVideos(prev => [...prev, ...transformedVideos]);
+      } else {
+        setVideos(transformedVideos);
+        if (transformedVideos.length > 0) {
+          setActiveIndex(0);
+        }
+      }
+
+      console.log(`✅ Batch loaded: ${transformedVideos.length} videos`);
+    } catch (error) {
+      console.error('Error in loadFeedBatch:', error);
+      if (!isLoadingMore) {
+        Alert.alert('Error', 'An unexpected error occurred');
+      }
+    } finally {
+      if (isLoadingMore) {
+        setLoadingMore(false);
+      } else {
+        setLoading(false);
+      }
+    }
+  };
 
   const getCurrentUser = async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
+        const { data: userData } = await supabase
+          .from('users')
+          .select('is_premium')
+          .eq('id', user.id)
+          .single();
+        setIsPremium(userData?.is_premium || false);
+        console.log('👤 User premium status:', userData?.is_premium || false);
         setCurrentUserId(user.id);
       }
     } catch (error) {
@@ -74,112 +190,95 @@ export default function HomeScreen() {
           latitude: location.coords.latitude,
           longitude: location.coords.longitude,
         });
-        console.log('User location obtained:', location.coords);
       }
     } catch (error) {
       console.error('Error getting user location:', error);
     }
   };
 
-  const loadVideos = async () => {
+  const saveUserLocationForNotifications = async () => {
     try {
-      setLoading(true);
+      const { status } = await Location.getForegroundPermissionsAsync();
+      if (status !== 'granted') return;
 
-      // Get current user to check liked videos
+      const location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
       const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-      // Calculate the timestamp for 1 hour ago
-      const oneHourAgo = new Date();
-      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
-      const oneHourAgoISO = oneHourAgo.toISOString();
+      await supabase
+        .from('users')
+        .update({
+          last_latitude: location.coords.latitude,
+          last_longitude: location.coords.longitude,
+          last_location_updated_at: new Date().toISOString(),
+        })
+        .eq('id', user.id);
 
-      console.log('Loading videos created after:', oneHourAgoISO);
-
-      // Fetch videos from Supabase with user information
-      // Only show videos created within the last hour
-      const { data, error } = await supabase
-        .from('videos')
-        .select(`
-          *,
-          users (
-            id,
-            username,
-            display_name,
-            avatar_url
-          )
-        `)
-        .eq('moderation_status', 'approved')
-        .gte('created_at', oneHourAgoISO)
-        .order('created_at', { ascending: false })
-        .limit(50);
-
-      if (error) {
-        console.error('Error loading videos:', error);
-        Alert.alert('Error', 'Failed to load videos');
-        return;
-      }
-
-      if (!data || data.length === 0) {
-        console.log('No videos found within the last hour');
-        setVideos([]);
-        return;
-      }
-
-      // Get liked videos for current user
-      let likedVideoIds: string[] = [];
-      if (user) {
-        const { data: likes } = await supabase
-          .from('likes')
-          .select('video_id')
-          .eq('user_id', user.id);
-        
-        likedVideoIds = likes?.map(like => like.video_id) || [];
-      }
-
-      // Transform data to VideoPost format
-      const transformedVideos: VideoPost[] = data.map((video: any) => ({
-        id: video.id,
-        videoUrl: video.video_url,
-        video_url: video.video_url,
-        thumbnailUrl: video.thumbnail_url,
-        caption: video.caption || '',
-        tags: video.tags || [],
-        latitude: video.location_latitude,
-        longitude: video.location_longitude,
-        locationName: video.location_name,
-        locationPrivacy: video.location_privacy,
-        users: video.users ? {
-          id: video.users.id,
-          username: video.users.username || 'Unknown',
-          display_name: video.users.display_name || 'Unknown User',
-          avatar_url: video.users.avatar_url,
-        } : undefined,
-        likes: video.likes_count || 0,
-        likes_count: video.likes_count || 0,
-        comments: video.comments_count || 0,
-        comments_count: video.comments_count || 0,
-        shares: video.shares_count || 0,
-        shares_count: video.shares_count || 0,
-        views: video.views_count || 0,
-        views_count: video.views_count || 0,
-        isLiked: likedVideoIds.includes(video.id),
-        createdAt: video.created_at,
-      }));
-
-      setVideos(transformedVideos);
-      console.log(`Loaded ${transformedVideos.length} videos (within last hour)`);
-      
-      // Start playing the first video
-      if (transformedVideos.length > 0) {
-        setActiveIndex(0);
-      }
+      await supabase.rpc('check_nearby_requests', {
+        p_user_id: user.id,
+        p_lat: location.coords.latitude,
+        p_lng: location.coords.longitude,
+      });
     } catch (error) {
-      console.error('Error in loadVideos:', error);
-      Alert.alert('Error', 'An unexpected error occurred');
-    } finally {
-      setLoading(false);
+      console.error('Error saving location:', error);
     }
   };
+
+  // ✅ useEffect AFTER all functions
+  useEffect(() => {
+  if (hasInitialized.current) return;
+  hasInitialized.current = true;
+
+  loadFeedBatch(false);
+  getUserLocation();
+  getCurrentUser();
+  saveUserLocationForNotifications();
+}, []);
+
+  // Background check for new videos every 30 seconds
+useEffect(() => {
+  if (!newestVideoTime.current) return;
+  let mounted = true;
+
+  const interval = setInterval(async () => {
+    if (!mounted) return;
+    try {
+      const { count, error } = await supabase
+        .from('videos')
+        .select('id', { count: 'exact', head: true })
+        .eq('moderation_status', 'approved')
+        .gt('created_at', newestVideoTime.current!);
+
+      if (!mounted) return;
+      if (!error && count && count > 0) {
+        setNewVideosCount(count);
+      }
+    } catch (err) {
+      console.error('Error checking new videos:', err);
+    }
+  }, 30000);
+
+  return () => {
+    mounted = false;
+    clearInterval(interval);
+  };
+}, [newestVideoTime.current]);
+
+useFocusEffect(
+  useCallback(() => {
+    if (!focusInitialized.current) {
+      focusInitialized.current = true;
+    }
+    setIsFocused(true);
+    return () => {
+      setIsFocused(false);
+      setActiveIndex(-1);
+    };
+  }, [])
+);
 
   const handleLike = async (videoId: string) => {
     try {
@@ -189,147 +288,162 @@ export default function HomeScreen() {
         return;
       }
 
-      // Check if already liked
-      const { data: existingLike } = await supabase
-        .from('likes')
-        .select('id')
-        .eq('video_id', videoId)
-        .eq('user_id', user.id)
-        .single();
+      const video = videos.find(v => v.id === videoId);
+      if (!video) return;
 
-      if (existingLike) {
-        // Unlike
-        await supabase
+      const currentIsLiked = video.isLiked;
+
+      if (currentIsLiked) {
+        const { error } = await supabase
           .from('likes')
           .delete()
           .eq('video_id', videoId)
           .eq('user_id', user.id);
 
-        // Decrement likes count
-        const { data: currentVideo } = await supabase
-          .from('videos')
-          .select('likes_count')
-          .eq('id', videoId)
-          .single();
-
-        if (currentVideo) {
-          const newCount = Math.max(0, (currentVideo.likes_count || 0) - 1);
-          await supabase
-            .from('videos')
-            .update({ likes_count: newCount })
-            .eq('id', videoId);
-
-          // Broadcast the update
-          const channel = supabase.channel(`video:${videoId}:stats`);
-          await channel.send({
-            type: 'broadcast',
-            event: 'stats_updated',
-            payload: {
-              video_id: videoId,
-              likes_count: newCount,
-            },
-          });
+        if (error) {
+          console.error('❌ Error removing like:', error);
+          Alert.alert('Error', 'Failed to unlike video');
+          return;
         }
 
         setVideos(videos.map(v =>
           v.id === videoId
-            ? { ...v, likes: Math.max(0, v.likes - 1), likes_count: Math.max(0, (v.likes_count || 0) - 1), isLiked: false }
+            ? {
+                ...v,
+                likes: Math.max(0, (v.likes || 0) - 1),
+                likes_count: Math.max(0, (v.likes_count || 0) - 1),
+                isLiked: false,
+              }
             : v
         ));
       } else {
-        // Like
-        await supabase
+        const { error } = await supabase
           .from('likes')
           .insert({ video_id: videoId, user_id: user.id });
 
-        // Increment likes count
-        const { data: currentVideo } = await supabase
-          .from('videos')
-          .select('likes_count')
-          .eq('id', videoId)
-          .single();
-
-        if (currentVideo) {
-          const newCount = (currentVideo.likes_count || 0) + 1;
-          await supabase
-            .from('videos')
-            .update({ likes_count: newCount })
-            .eq('id', videoId);
-
-          // Broadcast the update
-          const channel = supabase.channel(`video:${videoId}:stats`);
-          await channel.send({
-            type: 'broadcast',
-            event: 'stats_updated',
-            payload: {
-              video_id: videoId,
-              likes_count: newCount,
-            },
-          });
+        if (error) {
+          if (error.code === '23505') {
+            setVideos(videos.map(v =>
+              v.id === videoId ? { ...v, isLiked: true } : v
+            ));
+            return;
+          }
+          console.error('❌ Error adding like:', error);
+          Alert.alert('Error', 'Failed to like video');
+          return;
         }
 
         setVideos(videos.map(v =>
           v.id === videoId
-            ? { ...v, likes: v.likes + 1, likes_count: (v.likes_count || 0) + 1, isLiked: true }
+            ? {
+                ...v,
+                likes: (v.likes || 0) + 1,
+                likes_count: (v.likes_count || 0) + 1,
+                isLiked: true,
+              }
             : v
         ));
       }
     } catch (error) {
-      console.error('Error liking video:', error);
-      Alert.alert('Error', 'Failed to like video');
+      console.error('❌ Error in handleLike:', error);
+      Alert.alert('Error', 'Failed to update like');
     }
   };
 
-  const handleViewChange = useCallback((videoId: string) => {
-    // Track view only once per video
-    if (!viewedVideos.current.has(videoId)) {
-      viewedVideos.current.add(videoId);
-      trackView(videoId);
-    }
-  }, []);
-
   const trackView = async (videoId: string) => {
     try {
-      console.log('Tracking view for video:', videoId);
-      
-      // Increment view count in database
-      const { data: currentVideo } = await supabase
-        .from('videos')
-        .select('views_count')
-        .eq('id', videoId)
-        .single();
-
-      if (currentVideo) {
-        const newCount = (currentVideo.views_count || 0) + 1;
-        await supabase
-          .from('videos')
-          .update({ views_count: newCount })
-          .eq('id', videoId);
-
-        console.log('View tracked successfully, new count:', newCount);
-        
-        // Update local state
-        setVideos(prevVideos => prevVideos.map(v =>
-          v.id === videoId
-            ? { ...v, views: newCount, views_count: newCount }
-            : v
-        ));
+      const { data: newCount, error } = await supabase.rpc('increment_view_count', {
+        p_video_id: videoId,
+      });
+      if (error) {
+        console.error('❌ Error tracking view:', error);
+        return;
       }
+      setVideos(prevVideos => prevVideos.map(v =>
+        v.id === videoId
+          ? { ...v, views: newCount, views_count: newCount }
+          : v
+      ));
     } catch (error) {
-      console.error('Error tracking view:', error);
+      console.error('❌ Error tracking view:', error);
     }
+  };
+
+  const handleViewChange = (videoId: string) => {
+    trackView(videoId);
+    if (typeof trackVideoView === 'function') {
+      trackVideoView();
+    }
+  };
+
+  const handleLoadMore = () => {
+    if (allContentLoaded) return;
+    if (loadingMore) return;
+    loadFeedBatch(true);
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    seenVideoIds.current.clear();
+    setAllContentLoaded(false);
+    setNewVideosCount(0);
+    newestVideoTime.current = null;
+    await loadFeedBatch(false);
+    setRefreshing(false);
+  };
+
+  const handleNewVideosBanner = async () => {
+    setNewVideosCount(0);
+    setRefreshing(true);
+    seenVideoIds.current.clear();
+    setAllContentLoaded(false);
+    newestVideoTime.current = null;
+    await loadFeedBatch(false);
+    setRefreshing(false);
+    flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+  };
+
+  const getRandomPointInRadius = (lat: number, lon: number, radiusKm: number) => {
+    const radiusInDegrees = radiusKm / 111.32;
+    const angle = Math.random() * 2 * Math.PI;
+    const distance = Math.random() * radiusInDegrees;
+    const newLat = lat + (distance * Math.cos(angle));
+    const newLon = lon + (distance * Math.sin(angle)) / Math.cos(lat * Math.PI / 180);
+    return { latitude: newLat, longitude: newLon };
   };
 
   const renderItem = ({ item, index }: { item: VideoPost; index: number }) => {
     const isActive = isFocused && index === activeIndex;
-    
     return (
       <VideoFeedItem
         video={item}
         isActive={isActive}
-        onLike={handleLike}
+        onLike={() => {}}
         onViewChange={handleViewChange}
         userLocation={userLocation}
+        onLocationPress={(actualLat, actualLng, locationName) => {
+          let displayLat = actualLat;
+          let displayLng = actualLng;
+          const privacyRadius = item.locationPrivacy || 'exact';
+          if (privacyRadius === '3km') {
+            const randomPoint = getRandomPointInRadius(actualLat, actualLng, 3);
+            displayLat = randomPoint.latitude;
+            displayLng = randomPoint.longitude;
+          } else if (privacyRadius === '10km') {
+            const randomPoint = getRandomPointInRadius(actualLat, actualLng, 10);
+            displayLat = randomPoint.latitude;
+            displayLng = randomPoint.longitude;
+          }
+          router.push({
+            pathname: '/(tabs)/map',
+            params: {
+              centerLat: displayLat.toString(),
+              centerLng: displayLng.toString(),
+              videoId: item.id,
+              fromFeed: 'true',
+            },
+          });
+        }}
       />
     );
   };
@@ -338,14 +452,9 @@ export default function HomeScreen() {
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
       if (viewableItems.length > 0 && viewableItems[0].index !== null) {
         const newIndex = viewableItems[0].index;
-        console.log('Active video index changed to:', newIndex);
         setActiveIndex(newIndex);
-        
-        // Track view for the newly visible video
-        const video = videos[newIndex];
-        if (video) {
-          handleViewChange(video.id);
-        }
+      } else {
+        setActiveIndex(-1);
       }
     }
   ).current;
@@ -370,16 +479,24 @@ export default function HomeScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.emptyContainer}>
-          <IconSymbol name="video.fill" size={64} color={colors.textSecondary} />
+          <IconSymbol
+            ios_icon_name="video.fill"
+            android_material_icon_name="videocam"
+            size={64}
+            color={colors.textSecondary}
+          />
           <Text style={styles.emptyText}>No videos available</Text>
-          <Text style={styles.emptySubtext}>
-            Be the first to upload a video!
-          </Text>
+          <Text style={styles.emptySubtext}>Be the first to upload a video!</Text>
           <Pressable
             style={styles.uploadButton}
             onPress={() => router.push('/record-video')}
           >
             <Text style={styles.uploadButtonText}>Upload Video</Text>
+          </Pressable>
+          <Pressable style={styles.refreshButton} onPress={handleRefresh}>
+            <Text style={styles.refreshButtonText}>
+              {refreshing ? 'Refreshing...' : 'Refresh'}
+            </Text>
           </Pressable>
         </View>
       </SafeAreaView>
@@ -390,34 +507,80 @@ export default function HomeScreen() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaView style={styles.container} edges={['top']}>
         <FlatList
-        ref={flatListRef}
-        data={videos}
-        renderItem={renderItem}
-        keyExtractor={(item) => item.id}
-        pagingEnabled
-        showsVerticalScrollIndicator={false}
-        snapToInterval={SCREEN_HEIGHT}
-        snapToAlignment="start"
-        decelerationRate="fast"
-        onViewableItemsChanged={onViewableItemsChanged}
-        viewabilityConfig={viewabilityConfig}
-        removeClippedSubviews={false}
-        maxToRenderPerBatch={3}
-        windowSize={5}
-        initialNumToRender={2}
-        getItemLayout={(data, index) => ({
-          length: SCREEN_HEIGHT,
-          offset: SCREEN_HEIGHT * index,
-          index,
-        })}
+          ref={flatListRef}
+          data={videos}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+            />
+          }
+          renderItem={renderItem}
+          keyExtractor={(item) => item.id}
+          pagingEnabled
+          showsVerticalScrollIndicator={false}
+          snapToInterval={SCREEN_HEIGHT}
+          snapToAlignment="start"
+          decelerationRate="fast"
+          onViewableItemsChanged={onViewableItemsChanged}
+          viewabilityConfig={viewabilityConfig}
+          onEndReached={handleLoadMore}
+          onEndReachedThreshold={0.5}
+          ListFooterComponent={
+            loadingMore ? (
+              <View style={styles.loadingMore}>
+                <ActivityIndicator size="small" color={colors.primary} />
+                <Text style={styles.loadingMoreText}>Loading more videos...</Text>
+              </View>
+            ) : allContentLoaded ? (
+              <View style={styles.loadingMore}>
+                <Image
+                  source={require('@/assets/images/pingsonmap.png')}
+                  style={styles.endOfFeedImage}
+                />
+                <Text style={styles.endOfFeedText}>
+                  The world is waiting — no filters, no edits, just the real world through your camera.
+                </Text>
+                <Pressable style={styles.postVideoButton} onPress={() => router.push('/record-video')}>
+                  <Text style={styles.postVideoButtonText}>Post a Video</Text>
+                </Pressable>
+                <Pressable style={styles.refreshFeedButton} onPress={handleRefresh}>
+                  <Text style={styles.refreshFeedButtonText}>Refresh Feed</Text>
+                </Pressable>
+              </View>
+            ) : null
+          }
+          removeClippedSubviews={false}
+          maxToRenderPerBatch={3}
+          windowSize={5}
+          initialNumToRender={2}
+          getItemLayout={(data, index) => ({
+            length: SCREEN_HEIGHT,
+            offset: SCREEN_HEIGHT * index,
+            index,
+          })}
         />
-        
-        {/* Search Button */}
+
+        {newVideosCount > 0 && (
+          <Pressable style={styles.newVideosBanner} onPress={handleNewVideosBanner}>
+            <Text style={styles.newVideosBannerText}>
+              {newVideosCount} new video{newVideosCount === 1 ? '' : 's'} — Tap to watch
+            </Text>
+          </Pressable>
+        )}
+
         <Pressable
           style={styles.searchButton}
           onPress={() => router.push('/(tabs)/search')}
         >
-          <IconSymbol name="magnifyingglass" size={24} color="white" />
+          <IconSymbol
+            ios_icon_name="magnifyingglass"
+            android_material_icon_name="search"
+            size={24}
+            color="white"
+          />
         </Pressable>
       </SafeAreaView>
     </GestureHandlerRootView>
@@ -479,5 +642,86 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 100,
+  },
+  loadingMore: {
+    height: SCREEN_HEIGHT,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    paddingBottom: 120,
+  },
+  loadingMoreText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: colors.textSecondary,
+  },
+  newVideosBanner: {
+    position: 'absolute',
+    top: 60,
+    left: 20,
+    right: 80,
+    backgroundColor: colors.primary,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+    zIndex: 100,
+    alignItems: 'center',
+  },
+  newVideosBannerText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  refreshButton: {
+    marginTop: 16,
+    paddingHorizontal: 32,
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  refreshButtonText: {
+    color: colors.primary,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  endOfFeedText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.textSecondary,
+    marginTop: 24,
+    marginBottom: 16,
+    textAlign: 'center',
+    paddingHorizontal: 20,
+  },
+  postVideoButton: {
+    backgroundColor: colors.primary,
+    paddingHorizontal: 32,
+    paddingVertical: 14,
+    borderRadius: 12,
+    marginBottom: 12,
+  },
+  postVideoButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  refreshFeedButton: {
+    paddingHorizontal: 32,
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  refreshFeedButtonText: {
+    color: colors.primary,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  endOfFeedImage: {
+    width: 400,
+    height: 400,
+    resizeMode: 'contain',
+    marginBottom: 8,
   },
 });

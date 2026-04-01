@@ -1,25 +1,34 @@
 {
+  "cli": {
+    "appVersionSource": "local"
+  },
   "build": {
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "autoIncrement": true
+      "ios": {
+        "simulator": false
+      }
     },
     "preview": {
-      "distribution": "internal",
-      "autoIncrement": true
+      "developmentClient": false,
+      "distribution": "internal"
     },
     "production": {
-      "autoIncrement": true,
-      "channel": "production"
+      "developmentClient": false,
+      "distribution": "store",
+      "env": {
+        "EXPO_NO_CAPABILITY_SYNC": "1",
+        "EXPO_PUBLIC_REVENUECAT_API_KEY_IOS": "appl_xcWudPboOAYeEJdjZYDabdgtuhf",
+        "EXPO_PUBLIC_REVENUECAT_API_KEY_ANDROID": "goog_UgRmzwcdSimYbnckKmSrqxQnOQa"
+      }
     }
   },
   "submit": {
-    "production": {}
-  },
-  "update": {
     "production": {
-      "channel": "production"
+      "ios": {
+        "ascAppId": "6756990681"
+      }
     }
   }
 }

@@ -1,6 +1,6 @@
-
 import React, { useState, useEffect } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { PremiumAvatar } from '@/components/PremiumAvatar';
 import { colors } from '@/styles/commonStyles';
 import { VideoPost } from '@/types/video';
 import { IconSymbol } from '@/components/IconSymbol';
@@ -26,15 +26,15 @@ type SearchTab = 'videos' | 'users' | 'tags';
 interface SearchUser {
   id: string;
   username: string;
-  displayName: string;
   avatar?: string;
-  followers: number;
-  videosCount: number;
+  is_premium?: boolean;
+  lifetime_videos_count: number;
+  lifetime_views_count: number;
+  lifetime_likes_count: number;
 }
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = (SCREEN_WIDTH - 48) / 2;
-const VIDEOS_PER_PAGE = 10;
 
 const styles = StyleSheet.create({
   container: {
@@ -53,7 +53,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     gap: 8,
-    boxShadow: '0px 2px 8px rgba(0, 0, 0, 0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
     elevation: 2,
   },
   searchInput: {
@@ -115,7 +118,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     overflow: 'hidden',
     backgroundColor: colors.card,
-    boxShadow: '0px 2px 8px rgba(0, 0, 0, 0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
     elevation: 3,
   },
   videoThumbnail: {
@@ -131,7 +137,6 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontWeight: '600',
     marginBottom: 4,
-    numberOfLines: 2,
   },
   videoUsername: {
     fontSize: 11,
@@ -163,61 +168,23 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 8,
   },
-  paginationContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 16,
-    paddingBottom: 100,
-  },
-  paginationButton: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 20,
-    backgroundColor: colors.primary,
-    minWidth: 100,
-  },
-  paginationButtonDisabled: {
-    backgroundColor: colors.textSecondary + '40',
-  },
-  paginationButtonText: {
-    color: colors.card,
-    fontSize: 14,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
-  paginationInfo: {
-    fontSize: 14,
-    color: colors.text,
-    fontWeight: '600',
-  },
   usersList: {
     padding: 16,
   },
-  userItem: {
+  userCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 12,
+    padding: 16,
     backgroundColor: colors.card,
     borderRadius: 12,
     marginBottom: 12,
-    boxShadow: '0px 2px 8px rgba(0, 0, 0, 0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
     elevation: 2,
   },
-  userAvatar: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: colors.primary + '20',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  userAvatarImage: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 28,
-  },
+  // User avatar styles removed - now handled by PremiumAvatar component
   userInfo: {
     flex: 1,
   },
@@ -230,42 +197,45 @@ const styles = StyleSheet.create({
   userUsername: {
     fontSize: 14,
     color: colors.textSecondary,
-    marginBottom: 4,
   },
-  userStats: {
+  userStatsContainer: {
+    flexDirection: 'column',
+    alignItems: 'flex-end',
+    gap: 4,
+  },
+  userStatRow: {
     flexDirection: 'row',
-    gap: 16,
+    alignItems: 'center',
+    gap: 4,
   },
-  userStat: {
-    fontSize: 12,
+  userStatLabel: {
+    fontSize: 11,
     color: colors.textSecondary,
+    fontWeight: '500',
   },
-  followButton: {
-    paddingHorizontal: 20,
-    paddingVertical: 8,
-    borderRadius: 20,
-    overflow: 'hidden',
-  },
-  followButtonText: {
-    color: colors.card,
-    fontSize: 14,
-    fontWeight: '600',
+  userStatValue: {
+    fontSize: 13,
+    color: colors.text,
+    fontWeight: '700',
   },
   tagsList: {
     padding: 16,
   },
-  tagItem: {
+  tagCard: {
     padding: 16,
     backgroundColor: colors.card,
     borderRadius: 12,
     marginBottom: 12,
-    boxShadow: '0px 2px 8px rgba(0, 0, 0, 0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
     elevation: 2,
   },
   tagName: {
     fontSize: 18,
     fontWeight: '700',
-    color: colors.text,
+    color: colors.primary,
     marginBottom: 4,
   },
   tagCount: {
@@ -278,8 +248,7 @@ export default function SearchScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<SearchTab>('videos');
   const [isSearching, setIsSearching] = useState(false);
-  const [allVideos, setAllVideos] = useState<VideoPost[]>([]);
-  const [currentPage, setCurrentPage] = useState(1);
+  const [videos, setVideos] = useState<VideoPost[]>([]);
   const [searchResults, setSearchResults] = useState<{
     users: SearchUser[];
     tags: { name: string; count: number }[];
@@ -288,40 +257,76 @@ export default function SearchScreen() {
     tags: [],
   });
 
-  useEffect(() => {
-    if (searchQuery.trim().length > 0) {
-      handleSearch(searchQuery);
-    } else {
-      setAllVideos([]);
-      setSearchResults({ users: [], tags: [] });
-      setCurrentPage(1);
-    }
+useEffect(() => {
+    let mounted = true;
+
+    const runSearch = async () => {
+      if (searchQuery.trim().length > 0) {
+        await handleSearch(searchQuery);
+      } else {
+        if (mounted) setVideos([]);
+        if (mounted) setSearchResults({ users: [], tags: [] });
+      }
+    };
+
+    runSearch();
+
+    return () => {
+      mounted = false;
+    };
   }, [searchQuery]);
 
   const handleSearch = async (query: string) => {
     if (query.trim().length === 0) {
-      setAllVideos([]);
+      setVideos([]);
       setSearchResults({ users: [], tags: [] });
-      setCurrentPage(1);
       return;
     }
 
     setIsSearching(true);
-    setCurrentPage(1);
-    console.log('Searching for:', query);
+console.log('Searching for:', query);
 
-    try {
-      // Search videos
-      const videos = await searchVideos(query);
-      
-      // Search users
-      const users = await searchUsers(query);
-      
-      // Search tags
-      const tags = await searchTags(query);
+try {
+  // Get blocked users
+  let blockedUserIds: string[] = [];
+  const { data: { user } } = await supabase.auth.getUser();
+  if (user) {
+    const { data: blockedData } = await supabase
+      .from('blocked_users')
+      .select('blocked_id')
+      .eq('blocker_id', user.id);
 
-      setAllVideos(videos);
-      setSearchResults({ users, tags });
+    const { data: blockedByData } = await supabase
+      .from('blocked_users')
+      .select('blocker_id')
+      .eq('blocked_id', user.id);
+
+    blockedUserIds = [
+      ...(blockedData?.map(b => b.blocked_id) || []),
+      ...(blockedByData?.map(b => b.blocker_id) || []),
+    ];
+  }
+
+  // Search videos
+  const videoResults = await searchVideos(query);
+  
+  // Search users
+  const userResults = await searchUsers(query);
+  
+  // Search tags
+  const tagResults = await searchTags(query);
+
+  // Filter blocked users from results
+  const filteredVideos = blockedUserIds.length > 0
+  ? videoResults.filter(v => !blockedUserIds.includes((v as any).users?.id || (v as any).user_id))
+  : videoResults;
+
+  const filteredUsers = blockedUserIds.length > 0
+    ? userResults.filter(u => !blockedUserIds.includes(u.id))
+    : userResults;
+
+  setVideos(filteredVideos);
+  setSearchResults({ users: filteredUsers, tags: tagResults });
     } catch (error) {
       console.error('Search error:', error);
     } finally {
@@ -334,7 +339,7 @@ export default function SearchScreen() {
       const searchTerm = query.toLowerCase();
       const hashtagSearch = searchTerm.startsWith('#') ? searchTerm : `#${searchTerm}`;
 
-      console.log('=== ENHANCED VIDEO SEARCH (NO USERNAME) ===');
+      console.log('=== VIDEO SEARCH ===');
       console.log('Search term:', searchTerm);
 
       // Calculate the timestamp for 1 hour ago
@@ -344,19 +349,19 @@ export default function SearchScreen() {
 
       console.log('Loading videos created after:', oneHourAgoISO);
 
-      // Search ONLY in caption, location_name, and tags (NO USERNAME SEARCH)
+      // Search in caption, location_name, and tags
       // Only show videos created within the last hour
       const { data: videoResults, error: videoError } = await supabase
         .from('videos')
         .select(`
-          *,
-          users (
-            id,
-            username,
-            display_name,
-            avatar_url
-          )
-        `)
+  *,
+  users (
+    id,
+    username,
+    avatar_url,
+    is_premium
+  )
+`)
         .eq('moderation_status', 'approved')
         .gte('created_at', oneHourAgoISO)
         .or(`caption.ilike.%${searchTerm}%,location_name.ilike.%${searchTerm}%,tags.cs.{${hashtagSearch}}`)
@@ -381,32 +386,30 @@ export default function SearchScreen() {
         likedVideoIds = likes?.map(like => like.video_id) || [];
       }
 
-      // Randomize the order of videos
-      const shuffledVideos = (videoResults || []).sort(() => Math.random() - 0.5);
-
-      return shuffledVideos.map((video: any) => ({
+      return (videoResults || []).map((video: any) => ({
         id: video.id,
         videoUrl: video.video_url,
+        video_url: video.video_url,
         thumbnailUrl: video.thumbnail_url,
-        caption: video.caption,
+        caption: video.caption || '',
         tags: video.tags || [],
-        user: {
-          id: video.users?.id || '',
-          username: video.users?.username || 'Unknown',
-          displayName: video.users?.display_name || 'Unknown User',
-          avatar: video.users?.avatar_url,
-        },
-        location: video.location_latitude && video.location_longitude
-          ? {
-              latitude: video.location_latitude,
-              longitude: video.location_longitude,
-              name: video.location_name || 'Unknown Location',
-            }
-          : undefined,
+        latitude: video.location_latitude,
+        longitude: video.location_longitude,
+        locationName: video.location_name,
+        locationPrivacy: video.location_privacy,
+        users: video.users ? {
+          id: video.users.id,
+          username: video.users.username || 'Unknown',
+          avatar_url: video.users.avatar_url,
+        } : undefined,
         likes: video.likes_count || 0,
+        likes_count: video.likes_count || 0,
         comments: video.comments_count || 0,
+        comments_count: video.comments_count || 0,
         shares: video.shares_count || 0,
+        shares_count: video.shares_count || 0,
         views: video.views_count || 0,
+        views_count: video.views_count || 0,
         isLiked: likedVideoIds.includes(video.id),
         createdAt: video.created_at,
       }));
@@ -421,10 +424,10 @@ export default function SearchScreen() {
       const searchTerm = query.toLowerCase();
 
       const { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .or(`username.ilike.%${searchTerm}%,display_name.ilike.%${searchTerm}%`)
-        .limit(20);
+  .from('users')
+  .select('*')
+  .or(`username.ilike.%${searchTerm}%`)
+  .limit(50);
 
       if (error) {
         console.error('Error searching users:', error);
@@ -432,13 +435,14 @@ export default function SearchScreen() {
       }
 
       return (data || []).map((user: any) => ({
-        id: user.id,
-        username: user.username,
-        displayName: user.display_name || user.username,
-        avatar: user.avatar_url,
-        followers: user.followers_count || 0,
-        videosCount: user.videos_count || 0,
-      }));
+  id: user.id,
+  username: user.username,
+  avatar: user.avatar_url,
+  is_premium: user.is_premium || false,
+  lifetime_videos_count: user.lifetime_videos_count || 0,
+  lifetime_views_count: user.lifetime_views_count || 0,
+  lifetime_likes_count: user.lifetime_likes_count || 0,
+}));
     } catch (error) {
       console.error('Error in searchUsers:', error);
       return [];
@@ -450,23 +454,24 @@ export default function SearchScreen() {
       const searchTerm = query.toLowerCase();
       const hashtagSearch = searchTerm.startsWith('#') ? searchTerm : `#${searchTerm}`;
 
-      // Get all videos with matching tags
+      // Get all videos with tags containing the search term
       const { data, error } = await supabase
         .from('videos')
         .select('tags')
-        .eq('moderation_status', 'approved')
-        .contains('tags', [hashtagSearch]);
+        .eq('moderation_status', 'approved');
 
       if (error) {
         console.error('Error searching tags:', error);
         return [];
       }
 
-      // Count occurrences of each tag
+      // Count occurrences of each matching tag
       const tagCounts: { [key: string]: number } = {};
       (data || []).forEach((video: any) => {
         (video.tags || []).forEach((tag: string) => {
-          if (tag.toLowerCase().includes(searchTerm)) {
+          const tagLower = tag.toLowerCase();
+          // Check if tag contains the search term
+          if (tagLower.includes(searchTerm)) {
             tagCounts[tag] = (tagCounts[tag] || 0) + 1;
           }
         });
@@ -476,7 +481,7 @@ export default function SearchScreen() {
       return Object.entries(tagCounts)
         .map(([name, count]) => ({ name, count }))
         .sort((a, b) => b.count - a.count)
-        .slice(0, 20);
+        .slice(0, 50);
     } catch (error) {
       console.error('Error in searchTags:', error);
       return [];
@@ -495,30 +500,104 @@ export default function SearchScreen() {
 
   const handleVideoPress = (video: VideoPost, index: number) => {
     console.log('Video card pressed:', video.id, 'at index:', index);
-    // Navigate to search video player with all videos and starting index
+    // Navigate to search video player with all video IDs and starting index
     router.push({
       pathname: '/search-video-player',
       params: {
-        videoIds: JSON.stringify(allVideos.map(v => v.id)),
+        videoIds: JSON.stringify(videos.map(v => v.id)),
         startIndex: index.toString(),
       },
     });
   };
 
-  const totalPages = Math.ceil(allVideos.length / VIDEOS_PER_PAGE);
-  const startIndex = (currentPage - 1) * VIDEOS_PER_PAGE;
-  const endIndex = startIndex + VIDEOS_PER_PAGE;
-  const currentVideos = allVideos.slice(startIndex, endIndex);
-
-  const handleNextPage = () => {
-    if (currentPage < totalPages) {
-      setCurrentPage(currentPage + 1);
-    }
+  const handleUserPress = (user: SearchUser) => {
+    console.log('User card pressed:', user.id);
+    // Navigate to user profile
+    router.push({
+      pathname: '/user-profile',
+      params: { userId: user.id },
+    });
   };
 
-  const handlePrevPage = () => {
-    if (currentPage > 1) {
-      setCurrentPage(currentPage - 1);
+  const handleTagPress = async (tagName: string) => {
+    console.log('Tag pressed:', tagName);
+    
+    // Search for videos with this specific tag
+    setIsSearching(true);
+    setActiveTab('videos');
+    
+    try {
+      const oneHourAgo = new Date();
+      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+      const oneHourAgoISO = oneHourAgo.toISOString();
+
+      const { data: videoResults, error } = await supabase
+        .from('videos')
+        .select(`
+  *,
+  users (
+    id,
+    username,
+    avatar_url,
+    is_premium
+  )
+`)
+        .eq('moderation_status', 'approved')
+        .gte('created_at', oneHourAgoISO)
+        .contains('tags', [tagName])
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Error loading videos for tag:', error);
+        return;
+      }
+
+      // Get current user to check liked videos
+      const { data: { user } } = await supabase.auth.getUser();
+      let likedVideoIds: string[] = [];
+      if (user) {
+        const { data: likes } = await supabase
+          .from('likes')
+          .select('video_id')
+          .eq('user_id', user.id);
+        
+        likedVideoIds = likes?.map(like => like.video_id) || [];
+      }
+
+      const formattedVideos = (videoResults || []).map((video: any) => ({
+        id: video.id,
+        videoUrl: video.video_url,
+        video_url: video.video_url,
+        thumbnailUrl: video.thumbnail_url,
+        caption: video.caption || '',
+        tags: video.tags || [],
+        latitude: video.location_latitude,
+        longitude: video.location_longitude,
+        locationName: video.location_name,
+        locationPrivacy: video.location_privacy,
+        users: video.users ? {
+          id: video.users.id,
+          username: video.users.username || 'Unknown',
+          avatar_url: video.users.avatar_url,
+        } : undefined,
+        likes: video.likes_count || 0,
+        likes_count: video.likes_count || 0,
+        comments: video.comments_count || 0,
+        comments_count: video.comments_count || 0,
+        shares: video.shares_count || 0,
+        shares_count: video.shares_count || 0,
+        views: video.views_count || 0,
+        views_count: video.views_count || 0,
+        isLiked: likedVideoIds.includes(video.id),
+        createdAt: video.created_at,
+      }));
+
+      setVideos(formattedVideos);
+      setSearchQuery(tagName);
+    } catch (error) {
+      console.error('Error in handleTagPress:', error);
+    } finally {
+      setIsSearching(false);
     }
   };
 
@@ -544,7 +623,7 @@ export default function SearchScreen() {
 
     switch (activeTab) {
       case 'videos':
-        if (allVideos.length === 0) {
+        if (videos.length === 0) {
           return (
             <View style={styles.emptyContainer}>
               <IconSymbol name="film" size={64} color={colors.textSecondary} />
@@ -554,14 +633,14 @@ export default function SearchScreen() {
         }
         return (
           <ScrollView style={styles.videoGrid}>
-            {currentVideos.reduce((rows: VideoPost[][], video, index) => {
+            {videos.reduce((rows: VideoPost[][], video, index) => {
               if (index % 2 === 0) rows.push([]);
               rows[rows.length - 1].push(video);
               return rows;
             }, []).map((row, rowIndex) => (
               <View key={rowIndex} style={styles.videoRow}>
                 {row.map((video, colIndex) => {
-                  const actualIndex = startIndex + (rowIndex * 2) + colIndex;
+                  const actualIndex = (rowIndex * 2) + colIndex;
                   return (
                     <Pressable 
                       key={video.id} 
@@ -578,24 +657,24 @@ export default function SearchScreen() {
                           {video.caption}
                         </Text>
                         <Text style={styles.videoUsername} numberOfLines={1}>
-                          @{video.user?.username || 'Unknown'}
+                          @{video.users?.username || 'Unknown'}
                         </Text>
-                        {video.location && (
+                        {video.locationName && (
                           <Text style={styles.videoLocation} numberOfLines={1}>
-                            📍 {video.location.name}
+                            📍 {video.locationName}
                           </Text>
                         )}
                         <View style={styles.videoStats}>
                           <View style={styles.videoStat}>
                             <IconSymbol name="heart.fill" size={12} color={colors.textSecondary} />
                             <Text style={styles.videoStatsText}>
-                              {formatCount(video.likes)}
+                              {formatCount(video.likes_count || 0)}
                             </Text>
                           </View>
                           <View style={styles.videoStat}>
                             <IconSymbol name="bubble.left.fill" size={12} color={colors.textSecondary} />
                             <Text style={styles.videoStatsText}>
-                              {formatCount(video.comments)}
+                              {formatCount(video.comments_count || 0)}
                             </Text>
                           </View>
                         </View>
@@ -605,37 +684,6 @@ export default function SearchScreen() {
                 })}
               </View>
             ))}
-            
-            {/* Pagination Controls */}
-            {totalPages > 1 && (
-              <View style={styles.paginationContainer}>
-                <Pressable
-                  style={[
-                    styles.paginationButton,
-                    currentPage === 1 && styles.paginationButtonDisabled,
-                  ]}
-                  onPress={handlePrevPage}
-                  disabled={currentPage === 1}
-                >
-                  <Text style={styles.paginationButtonText}>Previous</Text>
-                </Pressable>
-                
-                <Text style={styles.paginationInfo}>
-                  Page {currentPage} of {totalPages}
-                </Text>
-                
-                <Pressable
-                  style={[
-                    styles.paginationButton,
-                    currentPage === totalPages && styles.paginationButtonDisabled,
-                  ]}
-                  onPress={handleNextPage}
-                  disabled={currentPage === totalPages}
-                >
-                  <Text style={styles.paginationButtonText}>Next</Text>
-                </Pressable>
-              </View>
-            )}
           </ScrollView>
         );
 
@@ -651,38 +699,35 @@ export default function SearchScreen() {
         return (
           <ScrollView style={styles.usersList}>
             {searchResults.users.map((user) => (
-              <View key={user.id} style={styles.userItem}>
-                <View style={styles.userAvatar}>
-                  {user.avatar ? (
-                    <Image
-                      source={{ uri: user.avatar }}
-                      style={styles.userAvatarImage}
-                    />
-                  ) : (
-                    <IconSymbol name="person.fill" size={28} color={colors.primary} />
-                  )}
-                </View>
+              <Pressable 
+                key={user.id} 
+                style={styles.userCard}
+                onPress={() => handleUserPress(user)}
+              >
+                <PremiumAvatar
+  avatarUrl={user.avatar}
+  size={60}
+  isPremium={user.is_premium || false}
+/>
                 <View style={styles.userInfo}>
                   <Text style={styles.userDisplayName}>{user.displayName}</Text>
                   <Text style={styles.userUsername}>@{user.username}</Text>
-                  <View style={styles.userStats}>
-                    <Text style={styles.userStat}>
-                      {formatCount(user.followers)} followers
-                    </Text>
-                    <Text style={styles.userStat}>
-                      {formatCount(user.videosCount)} videos
-                    </Text>
+                </View>
+                <View style={styles.userStatsContainer}>
+                  <View style={styles.userStatRow}>
+                    <Text style={styles.userStatLabel}>Videos:</Text>
+                    <Text style={styles.userStatValue}>{formatCount(user.lifetime_videos_count)}</Text>
+                  </View>
+                  <View style={styles.userStatRow}>
+                    <Text style={styles.userStatLabel}>Views:</Text>
+                    <Text style={styles.userStatValue}>{formatCount(user.lifetime_views_count)}</Text>
+                  </View>
+                  <View style={styles.userStatRow}>
+                    <Text style={styles.userStatLabel}>Likes:</Text>
+                    <Text style={styles.userStatValue}>{formatCount(user.lifetime_likes_count)}</Text>
                   </View>
                 </View>
-                <Pressable style={styles.followButton}>
-                  <LinearGradient
-                    colors={[colors.primary, colors.secondary]}
-                    style={styles.followButton}
-                  >
-                    <Text style={styles.followButtonText}>Follow</Text>
-                  </LinearGradient>
-                </Pressable>
-              </View>
+              </Pressable>
             ))}
           </ScrollView>
         );
@@ -701,11 +746,8 @@ export default function SearchScreen() {
             {searchResults.tags.map((tag, index) => (
               <Pressable 
                 key={index} 
-                style={styles.tagItem}
-                onPress={() => {
-                  setSearchQuery(tag.name);
-                  setActiveTab('videos');
-                }}
+                style={styles.tagCard}
+                onPress={() => handleTagPress(tag.name)}
               >
                 <Text style={styles.tagName}>{tag.name}</Text>
                 <Text style={styles.tagCount}>
@@ -739,7 +781,7 @@ export default function SearchScreen() {
             />
             {searchQuery.length > 0 && (
               <Pressable onPress={() => setSearchQuery('')}>
-                <IconSymbol name="xmark.circle.fill" size={20} color={colors.textSecondary} />
+                <IconSymbol name="xmark.circle.fill" android_material_icon_name="cancel" size={20} color={colors.textSecondary} />
               </Pressable>
             )}
           </View>

@@ -1,15 +1,9 @@
-
 import React from "react";
-import { SymbolWeight } from "expo-symbols";
-import {
-  OpaqueColorValue,
-  StyleProp,
-  TextStyle,
-  ViewStyle,
-} from "react-native";
+import { Platform, OpaqueColorValue, StyleProp, TextStyle, ViewStyle } from "react-native";
+import { SymbolView, SymbolWeight } from "expo-symbols";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 
-// Mapping of SF Symbols to Material Icons (for backward compatibility)
+// Mapping of SF Symbols to Material Icons
 const MAPPING = {
   'house.fill': 'home',
   'magnifyingglass': 'search',
@@ -37,6 +31,20 @@ const MAPPING = {
   'binoculars.fill': 'search',
   'binoculars': 'search',
   'paperplane.fill': 'send',
+  'arrow.clockwise': 'refresh',
+  'chevron.left': 'chevron-left',
+  'chevron.right': 'chevron-right',
+  'gearshape': 'settings',
+  'gearshape.fill': 'settings',
+  'star.fill': 'star',
+  'doc.text': 'description',
+  'lock.shield': 'privacy-tip',
+  'arrow.right.square': 'logout',
+  'info.circle.fill': 'info',
+  'scope': 'gps-fixed',
+  'circle': 'circle',
+  'circle.circle': 'adjust',
+  'arrow.up.circle.fill': 'cloud-upload',
 } as const;
 
 export type IconSymbolName = keyof typeof MAPPING;
@@ -48,6 +56,7 @@ export function IconSymbol({
   size = 24,
   color,
   style,
+  weight = "regular",
 }: {
   ios_icon_name?: string;
   android_material_icon_name?: string;
@@ -57,18 +66,42 @@ export function IconSymbol({
   style?: StyleProp<ViewStyle>;
   weight?: SymbolWeight;
 }) {
-  // Priority: android_material_icon_name > name (mapped) > fallback
+  // ✅ iOS: Use SF Symbols (native iOS icons)
+  if (Platform.OS === 'ios') {
+    const iosName = ios_icon_name || (name && MAPPING[name] ? name : undefined);
+    
+    if (!iosName) {
+      console.warn(`IconSymbol: No iOS icon name provided. ios_icon_name="${ios_icon_name}", name="${name}"`);
+      return (
+        <MaterialIcons
+          name="help"
+          size={size}
+          color={color as string}
+          style={style as StyleProp<TextStyle>}
+        />
+      );
+    }
+
+    return (
+      <SymbolView
+        name={iosName}
+        size={size}
+        tintColor={color}
+        weight={weight}
+        style={style}
+      />
+    );
+  }
+
+  // ✅ Android: Use Material Icons
   let iconName: string;
   
   if (android_material_icon_name) {
-    // Use the provided Material icon name directly
     iconName = android_material_icon_name;
   } else if (name && MAPPING[name]) {
-    // Use the mapping for backward compatibility
     iconName = MAPPING[name];
   } else {
-    // Fallback to help icon
-    console.warn(`IconSymbol: Invalid icon name provided. ios_icon_name="${ios_icon_name}", android_material_icon_name="${android_material_icon_name}", name="${name}"`);
+    console.warn(`IconSymbol: Invalid icon name for Android. android_material_icon_name="${android_material_icon_name}", name="${name}"`);
     iconName = 'help';
   }
   

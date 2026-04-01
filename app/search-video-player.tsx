@@ -18,6 +18,7 @@ import VideoFeedItem from '@/components/VideoFeedItem';
 import * as Location from 'expo-location';
 import { router, useLocalSearchParams } from 'expo-router';
 import { colors } from '@/styles/commonStyles';
+import { Pressable } from 'react-native'; // ← Add Pressable to imports
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -56,37 +57,66 @@ export default function SearchVideoPlayerScreen() {
     try {
       setLoading(true);
 
-      // Parse video IDs from params
-      const videoIds = JSON.parse(params.videoIds as string);
-      const startIndex = parseInt(params.startIndex as string, 10);
+      console.log('📦 Raw params received:', params);
+
+      // Validate params exist
+      if (!params.videoIds) {
+        console.error('❌ Missing videoIds parameter');
+        Alert.alert('Error', 'Video information is missing');
+        setLoading(false);
+        return;
+      }
+
+      // Parse video IDs from params with error handling
+      let videoIds: string[];
+      try {
+        videoIds = JSON.parse(params.videoIds as string);
+        console.log('✅ Parsed videoIds:', videoIds);
+      } catch (parseError) {
+        console.error('❌ Failed to parse videoIds:', parseError);
+        Alert.alert('Error', 'Invalid video data format');
+        setLoading(false);
+        return;
+      }
+
+      // Validate videoIds is an array
+      if (!Array.isArray(videoIds) || videoIds.length === 0) {
+        console.error('❌ videoIds is not a valid array:', videoIds);
+        Alert.alert('Error', 'No videos to display');
+        setLoading(false);
+        return;
+      }
+
+      const startIndex = params.startIndex ? parseInt(params.startIndex as string, 10) : 0;
 
       console.log('Loading videos for search player:', videoIds.length, 'videos, starting at index:', startIndex);
 
       // Get current user to check liked videos
-      const { data: { user } } = await supabase.auth.getUser();
+const { data: { user } } = await supabase.auth.getUser();
 
-      // Calculate the timestamp for 1 hour ago
-      const oneHourAgo = new Date();
-      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
-      const oneHourAgoISO = oneHourAgo.toISOString();
+// Fetch videos from Supabase with user information
+// For own videos: show videos up to 3 days old (for profile Videos tab)
+// For others' videos: show only videos within last hour (still live)
+const threeDaysAgo = new Date();
+threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+const threeDaysAgoISO = threeDaysAgo.toISOString();
 
-      console.log('Loading videos created after:', oneHourAgoISO);
+console.log('Loading videos created after:', threeDaysAgoISO);
 
-      // Fetch videos from Supabase with user information (only within last hour)
-      const { data, error } = await supabase
-        .from('videos')
-        .select(`
-          *,
-          users (
-            id,
-            username,
-            display_name,
-            avatar_url
-          )
-        `)
-        .in('id', videoIds)
-        .eq('moderation_status', 'approved')
-        .gte('created_at', oneHourAgoISO);
+const { data, error } = await supabase
+  .from('videos')
+  .select(`
+    *,
+    users (
+      id,
+      username,
+      avatar_url,
+      is_premium
+    )
+  `)
+  .in('id', videoIds)
+  .eq('moderation_status', 'approved')
+  .gte('created_at', threeDaysAgoISO); // ← Changed to 3 days
 
       if (error) {
         console.error('Error loading videos:', error);
@@ -95,10 +125,31 @@ export default function SearchVideoPlayerScreen() {
       }
 
       if (!data || data.length === 0) {
-        console.log('No videos found');
-        setVideos([]);
-        return;
-      }
+  console.log('No videos found');
+  setVideos([]);
+  return;
+}
+
+// Filter out expired videos (older than 1 hour) ONLY if they're not owned by current user
+const oneHourAgo = new Date();
+oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+
+const filteredData = data.filter((video: any) => {
+  const videoCreatedAt = new Date(video.created_at);
+  const isOwnVideo = user && video.user_id === user.id;
+  const isExpired = videoCreatedAt < oneHourAgo;
+
+  // Keep video if:
+  // 1. It's the user's own video (even if expired to public)
+  // 2. OR it's not expired yet
+  return isOwnVideo || !isExpired;
+});
+
+if (filteredData.length === 0) {
+  console.log('All videos have expired');
+  setVideos([]);
+  return;
+}
 
       // Get liked videos for current user
       let likedVideoIds: string[] = [];
@@ -112,34 +163,35 @@ export default function SearchVideoPlayerScreen() {
       }
 
       // Transform data to VideoPost format
-      const transformedVideos: VideoPost[] = data.map((video: any) => ({
-        id: video.id,
-        videoUrl: video.video_url,
-        video_url: video.video_url,
-        thumbnailUrl: video.thumbnail_url,
-        caption: video.caption || '',
-        tags: video.tags || [],
-        latitude: video.location_latitude,
-        longitude: video.location_longitude,
-        locationName: video.location_name,
-        locationPrivacy: video.location_privacy,
-        users: video.users ? {
-          id: video.users.id,
-          username: video.users.username || 'Unknown',
-          display_name: video.users.display_name || 'Unknown User',
-          avatar_url: video.users.avatar_url,
-        } : undefined,
-        likes: video.likes_count || 0,
-        likes_count: video.likes_count || 0,
-        comments: video.comments_count || 0,
-        comments_count: video.comments_count || 0,
-        shares: video.shares_count || 0,
-        shares_count: video.shares_count || 0,
-        views: video.views_count || 0,
-        views_count: video.views_count || 0,
-        isLiked: likedVideoIds.includes(video.id),
-        createdAt: video.created_at,
-      }));
+const transformedVideos: VideoPost[] = filteredData.map((video: any) => ({
+  id: video.id,
+  videoUrl: video.video_url,
+  video_url: video.video_url,
+  library_id: video.library_id, // ← ADD THIS LINE
+  thumbnailUrl: video.thumbnail_url,
+  caption: video.caption || '',
+  tags: video.tags || [],
+  latitude: video.location_latitude,
+  longitude: video.location_longitude,
+  locationName: video.location_name,
+  locationPrivacy: video.location_privacy,
+  users: video.users ? {
+    id: video.users.id,
+    username: video.users.username || 'Unknown',
+    avatar_url: video.users.avatar_url,
+    is_premium: video.users.is_premium, // ← ALSO ADD THIS
+  } : undefined,
+  likes: video.likes_count || 0,
+  likes_count: video.likes_count || 0,
+  comments: video.comments_count || 0,
+  comments_count: video.comments_count || 0,
+  shares: video.shares_count || 0,
+  shares_count: video.shares_count || 0,
+  views: video.views_count || 0,
+  views_count: video.views_count || 0,
+  isLiked: likedVideoIds.includes(video.id),
+  createdAt: video.created_at,
+}));
 
       // Sort videos to match the original order
       const sortedVideos = videoIds
@@ -300,18 +352,36 @@ export default function SearchVideoPlayerScreen() {
   }, []);
 
   const renderItem = ({ item, index }: { item: VideoPost; index: number }) => {
-    const isActive = index === activeIndex;
-    
-    return (
-      <VideoFeedItem
-        video={item}
-        isActive={isActive}
-        onLike={handleLike}
-        onViewChange={handleViewChange}
-        userLocation={userLocation}
-      />
-    );
-  };
+  const isActive = index === activeIndex;
+  
+  return (
+    <VideoFeedItem
+      video={item}
+      isActive={isActive}
+      onLike={handleLike}
+      onViewChange={handleViewChange}
+      userLocation={userLocation}
+      onAvatarPress={(userId) => {
+  // Close video player and navigate to user profile (full page)
+  router.replace({
+    pathname: '/user-profile',
+    params: { userId },
+  });
+}}
+      onLocationPress={(latitude, longitude, locationName) => {
+  // Close video player and navigate to map (full page)
+  router.replace({
+    pathname: '/(tabs)/map',
+    params: {
+      latitude: latitude.toString(),
+      longitude: longitude.toString(),
+      locationName: locationName || 'Video Location',
+    },
+  });
+}}
+    />
+  );
+};
 
   const onViewableItemsChanged = useRef(
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
@@ -346,15 +416,25 @@ export default function SearchVideoPlayerScreen() {
   }
 
   if (videos.length === 0) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.emptyContainer}>
-          <Text style={styles.emptyText}>No videos available</Text>
-          <Text style={styles.emptySubtext}>Swipe right to go back</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.emptyContainer}>
+        <Text style={styles.emptyText}>😔 Video Expired</Text>
+        <Text style={styles.emptySubtext}>
+          This video is no longer available.{'\n'}
+          Videos expire after 1 hour.
+        </Text>
+        
+        <Pressable 
+          style={styles.closeButton} 
+          onPress={() => router.back()}
+        >
+          <Text style={styles.closeButtonText}>Close</Text>
+        </Pressable>
+      </View>
+    </SafeAreaView>
+  );
+}
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -432,8 +512,23 @@ const styles = StyleSheet.create({
     color: colors.text,
     marginBottom: 8,
   },
+  // KEEP ONLY THIS ONE (delete the duplicate above)
   emptySubtext: {
     fontSize: 14,
     color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  closeButton: {
+    marginTop: 24,
+    paddingHorizontal: 32,
+    paddingVertical: 12,
+    backgroundColor: colors.primary,
+    borderRadius: 24,
+  },
+  closeButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
 });
