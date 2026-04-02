@@ -740,17 +740,19 @@ export default function MapScreen() {
     }
   };
 
-  const handleAvatarPress = useCallback((userId: string) => {
-    setModalVisible(false);
-    setTimeout(() => {
-      router.push({
-        pathname: '/user-profile',
-        params: { userId },
-      });
-      setSelectedVideos([]);
-      setActiveVideoIndex(0);
-    }, 100);
-  }, []);
+const handleAvatarPress = useCallback((userId: string) => {
+  if (!mountedRef.current) return;
+  setModalVisible(false);
+  setTimeout(() => {
+    if (!mountedRef.current) return;
+    router.push({
+      pathname: '/user-profile',
+      params: { userId },
+    });
+    setSelectedVideos([]);
+    setActiveVideoIndex(0);
+  }, 100);
+}, []);
 
   const renderVideoItem = useCallback(({ item, index }: { item: VideoPost; index: number }) => {
     return (

@@ -148,6 +148,7 @@ const router = useRouter();
 // 🔧 FIX: Reload requests when returning to profile
 useFocusEffect(
   useCallback(() => {
+    if (!mountedRef.current) return;
     console.log('🔄 Profile screen focused - checking if refresh needed');
     
     // 🆕 ALWAYS reload profile (including premium status) when screen is focused
@@ -190,9 +191,10 @@ useEffect(() => {
   };
 }, []);
 
-  useEffect(() => {
+useEffect(() => {
+  if (!mountedRef.current) return;
   if (activeTab === 'videos') {
-    loadVideos(0, false); // Load page 0
+    loadVideos(0, false);
   } else if (activeTab === 'liked') {
       loadLikedVideos();
     } else if (activeTab === 'requests') {
@@ -290,17 +292,18 @@ useEffect(() => {
 
 // 🎬 Trigger animation when coins change
 useEffect(() => {
+  if (!mountedRef.current) return;
   if (prevCoinsRef.current !== 0 && coins !== 0) {
     const coinDifference = coins - prevCoinsRef.current;
-    
+
     if (coinDifference !== 0) {
       console.log('🎬 Coin animation triggered:', coinDifference);
-      setCoinAnimationAmount(coinDifference);
-      setShowCoinAnimation(true);
-      setTimeout(() => setShowCoinAnimation(false), 1100);
+      if (mountedRef.current) setCoinAnimationAmount(coinDifference);
+      if (mountedRef.current) setShowCoinAnimation(true);
+      setTimeout(() => { if (mountedRef.current) setShowCoinAnimation(false); }, 1100);
     }
   }
-  
+
   prevCoinsRef.current = coins;
 }, [coins]);
 
@@ -3166,9 +3169,10 @@ console.log('📋 Request Card:', {
                       hideUnlikeButton={activeTab !== 'liked'}
                       onAvatarPress={(userId) => {
                         setVideoModalVisible(false);
-                        setTimeout(() => {
-                          router.push({
-                            pathname: '/user-profile',
+setTimeout(() => {
+  if (!mountedRef.current) return;
+  router.push({
+    pathname: '/user-profile',
                             params: { userId },
                           });
                           setSelectedVideo(null);
