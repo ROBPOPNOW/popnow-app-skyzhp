@@ -6,7 +6,6 @@ import { AppState } from 'react-native';
 export function useCoinBalance(userId: string | null | undefined) {
   const [coins, setCoins] = useState<number>(0);
   const [loading, setLoading] = useState(true);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -18,15 +17,11 @@ export function useCoinBalance(userId: string | null | undefined) {
       return;
     }
 
-    console.log('💰 useCoinBalance: Setting up for user:', userId);
-
     const fetchBalance = async () => {
       if (!mountedRef.current) return;
-      if (!userId) return;
-      if (mountedRef.current) setLoading(true);
+      setLoading(true);
       const balance = await getUserCoins(userId);
       if (!mountedRef.current) return;
-      console.log('💰 Fetched coin balance:', balance);
       setCoins(balance);
       setLoading(false);
     };
@@ -45,52 +40,29 @@ export function useCoinBalance(userId: string | null | undefined) {
         },
         (payload) => {
           if (!mountedRef.current) return;
-          console.log('🔔 Real-time coin update received!');
           if (payload.new && 'coins' in payload.new) {
-            const newCoins = payload.new.coins as number;
-            console.log('  New coins:', newCoins);
-            if (mountedRef.current) setCoins(newCoins);
+            setCoins(payload.new.coins as number);
           }
         }
       )
       .subscribe();
 
-    console.log('⏱️ Starting balance polling (every 3 seconds)');
-    intervalRef.current = setInterval(async () => {
-      if (!mountedRef.current) return;
-      const latestBalance = await getUserCoins(userId);
-      if (!mountedRef.current) return;
-      setCoins(prev => {
-        if (latestBalance !== prev) {
-          console.log('🔄 Poll detected coin change:', prev, '→', latestBalance);
-          return latestBalance;
-        }
-        return prev;
-      });
-    }, 3000);
-
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       if (nextAppState === 'active' && mountedRef.current) {
-        console.log('📱 App became active - refreshing balance');
         fetchBalance();
       }
     });
 
     return () => {
       mountedRef.current = false;
-      console.log('🧹 Cleaning up useCoinBalance');
       supabase.removeChannel(channel);
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        console.log('⏱️ Stopped balance polling');
-      }
       subscription.remove();
     };
   }, [userId]);
 
   const refetch = async () => {
     if (!userId || !mountedRef.current) return;
-    if (mountedRef.current) setLoading(true);
+    setLoading(true);
     const balance = await getUserCoins(userId);
     if (!mountedRef.current) return;
     setCoins(balance);
