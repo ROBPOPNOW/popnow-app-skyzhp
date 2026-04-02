@@ -227,58 +227,61 @@ export default function HomeScreen() {
     }
   };
 
+ // ✅ mountedRef declared first
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
   // ✅ useEffect AFTER all functions
   useEffect(() => {
-  if (hasInitialized.current) return;
-  hasInitialized.current = true;
-
-  loadFeedBatch(false);
-  getUserLocation();
-  getCurrentUser();
-  saveUserLocationForNotifications();
-}, []);
+    if (hasInitialized.current) return;
+    hasInitialized.current = true;
+    loadFeedBatch(false);
+    getUserLocation();
+    getCurrentUser();
+    saveUserLocationForNotifications();
+  }, []);
 
   // Background check for new videos every 30 seconds
-useEffect(() => {
-  if (!newestVideoTime.current) return;
-  let mounted = true;
-
-  const interval = setInterval(async () => {
-    if (!mounted) return;
-    try {
-      const { count, error } = await supabase
-        .from('videos')
-        .select('id', { count: 'exact', head: true })
-        .eq('moderation_status', 'approved')
-        .gt('created_at', newestVideoTime.current!);
-
+  useEffect(() => {
+    let mounted = true;
+    const interval = setInterval(async () => {
       if (!mounted) return;
-      if (!error && count && count > 0) {
-        setNewVideosCount(count);
+      if (!newestVideoTime.current) return;
+      try {
+        const { count, error } = await supabase
+          .from('videos')
+          .select('id', { count: 'exact', head: true })
+          .eq('moderation_status', 'approved')
+          .gt('created_at', newestVideoTime.current!);
+        if (!mounted) return;
+        if (!error && count && count > 0) {
+          if (mountedRef.current) setNewVideosCount(count);
+        }
+      } catch (err) {
+        console.error('Error checking new videos:', err);
       }
-    } catch (err) {
-      console.error('Error checking new videos:', err);
-    }
-  }, 30000);
-
-  return () => {
-    mounted = false;
-    clearInterval(interval);
-  };
-}, [newestVideoTime.current]);
-
-useFocusEffect(
-  useCallback(() => {
-    if (!focusInitialized.current) {
-      focusInitialized.current = true;
-    }
-    setIsFocused(true);
+    }, 30000);
     return () => {
-      setIsFocused(false);
-      setActiveIndex(-1);
+      mounted = false;
+      clearInterval(interval);
     };
-  }, [])
-);
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!focusInitialized.current) {
+        focusInitialized.current = true;
+      }
+      if (mountedRef.current) setIsFocused(true);
+      return () => {
+        if (mountedRef.current) setIsFocused(false);
+        if (mountedRef.current) setActiveIndex(-1);
+      };
+    }, [])
+  );
 
   const handleLike = async (videoId: string) => {
     try {
