@@ -976,14 +976,14 @@ liveCount: {
   fontWeight: 'bold',
 },
 countSeparator: {
-  color: '#000000',
-  fontSize: 24, // ← Same as numbers
+  color: colors.text,
+  fontSize: 24,
   fontWeight: 'bold',
-  marginHorizontal: 0, // ← Add spacing
+  marginHorizontal: 0,
 },
 totalCount: {
-  color: '#000000',
-  fontSize: 24, // ← Match the other numbers
+  color: colors.text,
+  fontSize: 24,
   fontWeight: 'bold',
 },
 earningsCard: {

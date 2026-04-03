@@ -179,36 +179,48 @@ export default function MapScreen() {
         }
       }
 
-      // ⚡ STEP 1: Try to load cached location FIRST
+    // ⚡ STEP 1: Try to load cached location FIRST
+      let resolvedLocation: { latitude: number; longitude: number } | null = null;
       try {
         const cached = await AsyncStorage.getItem('cached_location');
         if (cached) {
           const cachedData = JSON.parse(cached);
           if (Date.now() - cachedData.timestamp < 86400000) {
             console.log('✅ Using cached location');
-            const cachedLocation = {
+            resolvedLocation = {
               latitude: cachedData.latitude,
               longitude: cachedData.longitude,
             };
-            if (mountedRef.current) setUserLocation(cachedLocation);
-            if (mountedRef.current) setInitialMapCenter(cachedLocation);
-            if (mountedRef.current) setHasInitializedMap(true);
           }
         }
       } catch (error) {
         // ignore cache errors
       }
 
-      // ⚡ STEP 2: If no cache, use default location (Auckland)
-      if (!userLocation) {
-        const defaultLocation = {
-          latitude: -36.8485,
-          longitude: 174.7633,
-        };
-        if (mountedRef.current) setUserLocation(defaultLocation);
-        if (mountedRef.current) setInitialMapCenter(defaultLocation);
-        if (mountedRef.current) setHasInitializedMap(true);
+      // ⚡ STEP 2: If no cache, try user profile location text as hint, fallback to Auckland
+      if (!resolvedLocation) {
+        // Try to get location from user profile
+        if (user) {
+          const { data: userData } = await supabase
+            .from('users')
+            .select('location')
+            .eq('id', user.id)
+            .single();
+
+          // location is a text string - we can't geocode it reliably,
+          // so just use Auckland as default for NZ/AU market
+          console.log('📍 User profile location text:', userData?.location || 'not set');
+        }
+
+        resolvedLocation = { latitude: -36.8485, longitude: 174.7633 };
+        console.log('📍 Using Auckland default');
       }
+
+      // ✅ KEY FIX: Set location AND mark GPS ready immediately
+      if (mountedRef.current) setUserLocation(resolvedLocation);
+      if (mountedRef.current) setInitialMapCenter(resolvedLocation);
+      if (mountedRef.current) setHasInitializedMap(true);
+      if (mountedRef.current) setIsGpsReady(true); // ← THIS IS THE FIX
 
       // ⚡ STEP 3: Load videos in parallel with GPS
       const loadVideosPromise = loadVideoLocations();

@@ -7,10 +7,10 @@ export function useCoinBalance(userId: string | null | undefined) {
   const [coins, setCoins] = useState<number>(0);
   const [loading, setLoading] = useState(true);
   const mountedRef = useRef(true);
+  const channelNameRef = useRef(`coin-balance-changes-${userId}-${Math.random().toString(36).slice(2)}`);
 
   useEffect(() => {
     mountedRef.current = true;
-
     if (!userId) {
       setCoins(0);
       setLoading(false);
@@ -29,7 +29,7 @@ export function useCoinBalance(userId: string | null | undefined) {
     fetchBalance();
 
     const channel = supabase
-      .channel('coin-balance-changes')
+      .channel(channelNameRef.current)
       .on(
         'postgres_changes',
         {

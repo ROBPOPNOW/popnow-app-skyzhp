@@ -213,6 +213,7 @@ useEffect(() => {
     <html>
     <head>
       <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="referrer" content="no-referrer-when-downgrade" />
       <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
       <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
       <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
@@ -339,9 +340,10 @@ useEffect(() => {
 });
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          attribution: '© OpenStreetMap',
-          maxZoom: 19,
-        }).addTo(map);
+  attribution: '© OpenStreetMap',
+  maxZoom: 19,
+  referrerPolicy: 'no-referrer-when-downgrade',
+}).addTo(map);
 
         var state = {
           cityClusterGroup: L.markerClusterGroup({

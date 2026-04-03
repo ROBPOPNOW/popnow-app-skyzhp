@@ -169,13 +169,18 @@ export default function EditProfileScreen() {
       }
 
       // Validation
-      if (isFirstTime && !username.trim()) {
-        Alert.alert('Required', 'Please enter a username');
-        return;
-      }
+if (isFirstTime && !username.trim()) {
+  Alert.alert('Required', 'Please enter a username');
+  return;
+}
 
-      if (isFirstTime && !isUsernameValid) {
+if (isFirstTime && !isUsernameValid) {
   Alert.alert('Invalid Username', 'Please enter a valid, available username');
+  return;
+}
+
+if (isFirstTime && !location.trim()) {
+  Alert.alert('Required', 'Please enter your location');
   return;
 }
 
@@ -308,7 +313,7 @@ export default function EditProfileScreen() {
             </View>
 
             <View style={styles.field}>
-              <Text style={styles.label}>Location</Text>
+              <Text style={styles.label}>Location {isFirstTime && '*'}</Text>
               <TextInput
                 style={styles.input}
                 value={location}

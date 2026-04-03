@@ -277,10 +277,11 @@ export default function FollowersListScreen() {
     onPress={() => handleFollowToggle(item.id)}
   >
     <IconSymbol 
-      name={item.isFollowing ? "checkmark" : "plus"} 
-      size={16} 
-      color={item.isFollowing ? "#333333" : "#000000"}  // ✅ Black for both
-    />
+  ios_icon_name={item.isFollowing ? "checkmark" : "plus"}
+  android_material_icon_name={item.isFollowing ? "check" : "add"}
+  size={16} 
+  color="#FFFFFF"
+/>
     <Text
       style={[
         styles.followButtonText,
@@ -485,11 +486,11 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   followButtonText: {
-  fontSize: 14,
-  fontWeight: '600',
-  color: '#000000',  // ✅ BLACK text for "Follow" button
-},
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
   followingButtonText: {
-    color: '#333333',  // ✅ Dark text for white "Following" button
+    color: '#FFFFFF',
   },
 });

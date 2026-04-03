@@ -63,7 +63,7 @@
         "backgroundColor": "#350420"
       },
       "package": "world.popnow.app",
-      "versionCode": 56,
+      "versionCode": 57,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
