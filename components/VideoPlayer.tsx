@@ -129,6 +129,7 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, onLoad, onE
  // Control playback based on isActive prop
   useEffect(() => {
     if (!playbackUrl || hasError || !player) return;
+    if (typeof player.play !== 'function') return;
     if (!mountedRef.current) return;
 
     console.log('isActive changed:', isActive, 'for video:', videoUrl);
@@ -174,12 +175,12 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, onLoad, onE
     }
   }, [isTouching, player, isActive]);
 
-  // Cleanup on unmount
+// Cleanup on unmount
   useEffect(() => {
     return () => {
       console.log('VideoPlayer unmounting, cleaning up:', videoUrl);
       try {
-        if (player) {
+        if (player && typeof player.pause === 'function') {
           player.pause();
           player.muted = true;
           player.volume = 0;
@@ -188,7 +189,7 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, onLoad, onE
         console.log('Cleanup error (expected):', error);
       }
     };
-  }, [player, videoUrl]);
+  }, []); // ← Empty deps - cleanup runs once on unmount only
 
   const handleLoad = () => {
     console.log('Video loaded successfully:', videoUrl);
