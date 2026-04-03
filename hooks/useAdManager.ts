@@ -60,6 +60,7 @@ export const useAdManager = (isPremium: boolean = false) => {
     if (globalInitialized) return;
     globalInitialized = true;
 
+   if (typeof MobileAds.initialize !== 'function') return;
     MobileAds.initialize()
       .then(() => {
         console.log('✅ AdMob ready');
