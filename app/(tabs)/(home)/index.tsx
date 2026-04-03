@@ -230,22 +230,42 @@ export default function HomeScreen() {
  // ✅ mountedRef declared first
   const mountedRef = useRef(true);
   useEffect(() => {
+    console.log('🔵 [EFFECT-1] mountedRef effect MOUNTING');
+    console.log('🔵 [EFFECT-1] mountedRef type:', typeof mountedRef);
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      console.log('🔴 [EFFECT-1] mountedRef effect UNMOUNTING');
+      mountedRef.current = false;
+    };
   }, []);
 
   // ✅ useEffect AFTER all functions
   useEffect(() => {
-    if (hasInitialized.current) return;
+    console.log('🔵 [EFFECT-2] init effect MOUNTING');
+    console.log('🔵 [EFFECT-2] loadFeedBatch type:', typeof loadFeedBatch);
+    console.log('🔵 [EFFECT-2] getUserLocation type:', typeof getUserLocation);
+    console.log('🔵 [EFFECT-2] getCurrentUser type:', typeof getCurrentUser);
+    console.log('🔵 [EFFECT-2] saveUserLocationForNotifications type:', typeof saveUserLocationForNotifications);
+    if (hasInitialized.current) {
+      console.log('🔵 [EFFECT-2] already initialized, skipping');
+      return;
+    }
     hasInitialized.current = true;
     loadFeedBatch(false);
     getUserLocation();
     getCurrentUser();
     saveUserLocationForNotifications();
+    return () => {
+      console.log('🔴 [EFFECT-2] init effect UNMOUNTING');
+    };
   }, []);
 
   // Background check for new videos every 30 seconds
   useEffect(() => {
+    console.log('🔵 [EFFECT-3] newVideos interval effect MOUNTING');
+    console.log('🔵 [EFFECT-3] supabase type:', typeof supabase);
+    console.log('🔵 [EFFECT-3] supabase.from type:', typeof supabase?.from);
+    console.log('🔵 [EFFECT-3] setNewVideosCount type:', typeof setNewVideosCount);
     let mounted = true;
     const interval = setInterval(async () => {
       if (!mounted) return;
@@ -265,6 +285,7 @@ export default function HomeScreen() {
       }
     }, 30000);
     return () => {
+      console.log('🔴 [EFFECT-3] newVideos interval effect UNMOUNTING');
       mounted = false;
       clearInterval(interval);
     };
@@ -272,11 +293,17 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      console.log('🔵 [FOCUS-EFFECT] useFocusEffect MOUNTING');
+      console.log('🔵 [FOCUS-EFFECT] setIsFocused type:', typeof setIsFocused);
+      console.log('🔵 [FOCUS-EFFECT] setActiveIndex type:', typeof setActiveIndex);
+      console.log('🔵 [FOCUS-EFFECT] mountedRef.current:', mountedRef.current);
       if (!focusInitialized.current) {
         focusInitialized.current = true;
       }
       if (mountedRef.current) setIsFocused(true);
       return () => {
+        console.log('🔴 [FOCUS-EFFECT] useFocusEffect CLEANUP');
+        console.log('🔴 [FOCUS-EFFECT] mountedRef.current at cleanup:', mountedRef.current);
         if (mountedRef.current) setIsFocused(false);
         if (mountedRef.current) setActiveIndex(-1);
       };
