@@ -39,7 +39,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "world.popnow.app",
-      "buildNumber": "37",
+      "buildNumber": "38",
       "icon": "./assets/images/icon.png",
       "associatedDomains": [
         "applinks:popnow.world"
@@ -63,7 +63,7 @@
         "backgroundColor": "#350420"
       },
       "package": "world.popnow.app",
-      "versionCode": 57,
+      "versionCode": 58,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",

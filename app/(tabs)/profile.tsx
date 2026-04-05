@@ -1208,6 +1208,43 @@ const handleNotificationPress = async (notification: any) => {
   console.log('Notification type:', notification.type);
   console.log('Notification data:', JSON.stringify(notification, null, 2));
 
+  // ⚡ Check if request is expired for ALL request-related notifications
+  const requestRelatedTypes = [
+    'request_first_fulfillment',
+    'request_expiring_soon',
+    'request_expired_no_fulfillments',
+    'request_fulfilled',
+    'nearby_request',
+    'nearby_request_needs_help',
+    'request_expired_grace_period',
+    'winner_selection_reminder_12h',
+    'winner_selection_reminder_1h',
+    'auto_winner_selected_requester',
+    'fulfillment_milestone',
+    'contributor_bonus',
+  ];
+
+  if (requestRelatedTypes.includes(notification.type) && notification.request_id) {
+    try {
+      const { data: requestData } = await supabase
+        .from('video_requests')
+        .select('expires_at, status')
+        .eq('id', notification.request_id)
+        .single();
+
+      // Request not found or expired
+      if (!requestData || new Date(requestData.expires_at) < new Date()) {
+        Alert.alert(
+          'Request Expired',
+          'This request expired. Next time, jump on it before the clock runs out! ⏰'
+        );
+        return;
+      }
+    } catch (error) {
+      console.error('Error checking request expiry:', error);
+    }
+  }
+
   // NEW: First fulfillment notification
 if (notification.type === 'request_first_fulfillment') {
   router.push({
@@ -2827,8 +2864,8 @@ console.log('📋 Request Card:', {
     </View>
   )}
   
-  <LinearGradient colors={[colors.background, colors.background]} style={styles.gradient}>
-        <ScrollView>
+<LinearGradient colors={[colors.background, colors.background]} style={styles.gradient}>
+      <View style={{ flex: 1 }}>
           {/* Profile Header - Horizontal Layout */}
           <View style={styles.header}>
 
@@ -3075,7 +3112,7 @@ console.log('📋 Request Card:', {
 )}
           {/* Content */}
           {renderContent()}
-        </ScrollView>
+      </View>
 
         {/* Edit Profile Modal */}
         <Modal
@@ -3146,7 +3183,7 @@ console.log('📋 Request Card:', {
           presentationStyle="fullScreen"
           onRequestClose={handleCloseVideoModal}
         >
-          <SafeAreaView style={styles.videoModalContainer}>
+          <View style={styles.videoModalContainer}>
             <Pressable style={styles.closeButton} onPress={handleCloseVideoModal}>
               <IconSymbol
                 ios_icon_name="xmark.circle.fill"
@@ -3186,9 +3223,9 @@ setTimeout(() => {
                 pagingEnabled
                 showsVerticalScrollIndicator={false}
                 initialScrollIndex={selectedVideoIndex}
-                getItemLayout={(data, index) => ({
-                  length: Dimensions.get('window').height,
-                  offset: Dimensions.get('window').height * index,
+               getItemLayout={(data, index) => ({
+                  length: Dimensions.get('screen').height,
+                  offset: Dimensions.get('screen').height * index,
                   index,
                 })}
                 onViewableItemsChanged={({ viewableItems }) => {
@@ -3199,9 +3236,9 @@ setTimeout(() => {
                 viewabilityConfig={{
                   itemVisiblePercentThreshold: 50,
                 }}
-              />
+             />
             )}
-          </SafeAreaView>
+          </View>
         </Modal>
 
         {/* 🪙 DAILY BONUS POPUP - ADDED */}
@@ -3815,7 +3852,7 @@ requestActionText: {
     zIndex: 10,
   },
   videoModalItem: {
-    height: Dimensions.get('window').height,
+    height: Dimensions.get('screen').height,
   },
   processingContainer: {
   flexDirection: 'row',

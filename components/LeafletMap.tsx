@@ -26,7 +26,8 @@ interface LeafletMapProps {
   userLocation?: { latitude: number; longitude: number } | null;
   isGpsReady?: boolean;
   locationDenied?: boolean;
-  onZoomChange?: (level: 'world' | 'country' | 'city') => void;  // ← ADD THIS
+  onZoomChange?: (level: 'world' | 'country' | 'city') => void;
+  isDarkMode?: boolean;
 }
 
 function LeafletMap({
@@ -41,7 +42,8 @@ function LeafletMap({
   userLocation,
   isGpsReady = false,
   locationDenied = false,
-  onZoomChange,  // ← ADD THIS
+  onZoomChange,
+  isDarkMode = false,
 }: LeafletMapProps) {
   const webViewRef = useRef<WebView>(null);
   const [isMapReady, setIsMapReady] = useState(false);
@@ -59,6 +61,40 @@ useEffect(() => {
   // ✅ SAVE INITIAL CENTER AND ZOOM - NEVER CHANGES AFTER FIRST RENDER
   const initialCenter = useRef(center || { latitude: -36.8485, longitude: 174.7633 });
   const initialZoom = useRef(zoom);
+
+// Update tile layer when theme changes without reloading WebView
+  useEffect(() => {
+    if (!isMapReady || !webViewRef.current) return;
+
+    const tileUrl = isDarkMode
+      ? `https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png?api_key=aca0beb5-22b7-44d7-b448-b7f381d58a9f`
+      : `https://tiles.stadiamaps.com/tiles/osm_bright/{z}/{x}/{y}{r}.png?api_key=aca0beb5-22b7-44d7-b448-b7f381d58a9f`;
+
+    webViewRef.current.injectJavaScript(`
+      (function() {
+        try {
+          if (window.tileLayer) {
+            map.removeLayer(window.tileLayer);
+          }
+          window.tileLayer = L.tileLayer('${tileUrl}', {
+            attribution: '© Stadia Maps © OpenStreetMap contributors',
+            maxZoom: 20,
+          }).addTo(map);
+        } catch(e) {
+          console.error('Error swapping tile layer:', e);
+        }
+      })();
+      true;
+    `);
+  }, [isDarkMode, isMapReady]);
+
+  useEffect(() => {
+    return () => {
+      if (updateTimeoutRef.current) {
+        clearTimeout(updateTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Update markers when they change
   useEffect(() => {
@@ -207,13 +243,15 @@ useEffect(() => {
   };
 
   // ✅ CREATE HTML ONLY ONCE WITH INITIAL CENTER
-  const htmlContent = useMemo(() => {
+const htmlContent = useMemo(() => {
+    const initialTileUrl = isDarkMode
+      ? `https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png?api_key=aca0beb5-22b7-44d7-b448-b7f381d58a9f`
+      : `https://tiles.stadiamaps.com/tiles/osm_bright/{z}/{x}/{y}{r}.png?api_key=aca0beb5-22b7-44d7-b448-b7f381d58a9f`;
     return `
     <!DOCTYPE html>
     <html>
     <head>
       <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<meta name="referrer" content="no-referrer-when-downgrade" />
       <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
       <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
       <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
@@ -339,11 +377,10 @@ useEffect(() => {
   maxZoom: 19,
 });
 
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '© OpenStreetMap',
-  maxZoom: 19,
-  referrerPolicy: 'no-referrer-when-downgrade',
-}).addTo(map);
+window.tileLayer = L.tileLayer('${initialTileUrl}', {
+          attribution: '© Stadia Maps © OpenStreetMap contributors',
+          maxZoom: 20,
+        }).addTo(map);
 
         var state = {
           cityClusterGroup: L.markerClusterGroup({
@@ -545,7 +582,7 @@ useEffect(() => {
     </body>
     </html>
     `;  // ← Close template string
-  }, []); // ← Close useMemo function with empty deps array
+  }, []); // ← Never recreate HTML - use JS injection for theme changes
 
   const getZoomIndicator = () => {
     if (zoomLevel === 'world') {
@@ -686,23 +723,26 @@ const styles = StyleSheet.create({
 export default React.memo(
   LeafletMap,
   (prevProps, nextProps) => {
-    
+    // Always re-render when dark mode changes
+    if (prevProps.isDarkMode !== nextProps.isDarkMode) {
+      return false;
+    }
+
     const prevMarkers = prevProps.markers || [];
     const nextMarkers = nextProps.markers || [];
-    
-    
+
     if (prevMarkers.length !== nextMarkers.length) {
       console.log('❌ Marker count changed - WILL RE-RENDER');
-      return false; // Re-render if count changed
+      return false;
     }
-    
+
     const prevIds = prevMarkers.map(m => m.id).sort().join(',');
     const nextIds = nextMarkers.map(m => m.id).sort().join(',');
-    
+
     if (prevIds !== nextIds) {
-      return false; // Re-render if marker IDs changed
+      return false;
     }
-    
+
     console.log('✅ Props are equal - PREVENTING RE-RENDER');
     return true;
   }

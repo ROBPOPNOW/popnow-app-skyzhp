@@ -17,6 +17,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { colors } from '@/styles/commonStyles';
 import * as ImagePicker from 'expo-image-picker';
+import * as Location from 'expo-location';
 import * as FileSystem from 'expo-file-system/legacy';
 import { IconSymbol } from '@/components/IconSymbol';
 import UsernameInput from '@/components/UsernameInput';
@@ -34,6 +35,7 @@ export default function EditProfileScreen() {
   const [saving, setSaving] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [isUsernameValid, setIsUsernameValid] = useState(false);
+const [isValidatingCity, setIsValidatingCity] = useState(false);
 
   useEffect(() => {
     loadProfile();
@@ -179,9 +181,41 @@ if (isFirstTime && !isUsernameValid) {
   return;
 }
 
-if (isFirstTime && !location.trim()) {
-  Alert.alert('Required', 'Please enter your location');
+if (!location.trim()) {
+  Alert.alert('Required', 'Please enter your city');
   return;
+}
+
+// Validate city name is real and geocodable
+setIsValidatingCity(true);
+try {
+  const geocodeResult = await Location.geocodeAsync(location.trim());
+  if (!geocodeResult || geocodeResult.length === 0) {
+    Alert.alert(
+      'Invalid City',
+      `No city found for "${location.trim()}". Please enter a valid city name.`
+    );
+    setIsValidatingCity(false);
+    return;
+  }
+  // Cache the coordinates for offline use
+  const { latitude, longitude } = geocodeResult[0];
+  const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+  await AsyncStorage.setItem('default_city_location', JSON.stringify({
+    latitude,
+    longitude,
+    cityName: location.trim(),
+    timestamp: Date.now(),
+  }));
+} catch (error) {
+  Alert.alert(
+    'Validation Error',
+    'Could not validate city name. Please check your internet connection and try again.'
+  );
+  setIsValidatingCity(false);
+  return;
+} finally {
+  setIsValidatingCity(false);
 }
 
       const updates: any = {
@@ -244,7 +278,7 @@ if (isFirstTime && !location.trim()) {
               <Pressable onPress={() => router.back()} style={styles.backButton}>
                 <IconSymbol 
                   ios_icon_name="chevron.left" 
-                  android_material_icon_name="arrow_back" 
+                  android_material_icon_name="arrow-back" 
                   size={24} 
                   color={colors.text} 
                 />
@@ -312,32 +346,35 @@ if (isFirstTime && !location.trim()) {
               />
             </View>
 
-            <View style={styles.field}>
-              <Text style={styles.label}>Location {isFirstTime && '*'}</Text>
-              <TextInput
-                style={styles.input}
-                value={location}
-                onChangeText={setLocation}
-                placeholder="Where are you from?"
-                placeholderTextColor={colors.textSecondary}
-              />
-            </View>
+           <View style={styles.field}>
+  <Text style={styles.label}>Location *</Text>
+  <TextInput
+    style={styles.input}
+    value={location}
+    onChangeText={setLocation}
+    placeholder="Enter your city (e.g. Auckland, Tokyo)"
+    placeholderTextColor={colors.textSecondary}
+  />
+  <Text style={styles.fieldTip}>
+    Enter your city so the map shows your area by default
+  </Text>
+</View>
           </View>
 
           {/* Save Button */}
           <Pressable
-            style={[styles.saveButton, saving && styles.saveButtonDisabled]}
-            onPress={handleSave}
-            disabled={saving}
-          >
-            {saving ? (
-              <ActivityIndicator size="small" color="#FFFFFF" />
-            ) : (
-              <Text style={styles.saveButtonText}>
-                {isFirstTime ? 'Complete Profile' : 'Save Changes'}
-              </Text>
-            )}
-          </Pressable>
+  style={[styles.saveButton, (saving || isValidatingCity) && styles.saveButtonDisabled]}
+  onPress={handleSave}
+  disabled={saving || isValidatingCity}
+>
+  {(saving || isValidatingCity) ? (
+    <ActivityIndicator size="small" color="#FFFFFF" />
+  ) : (
+    <Text style={styles.saveButtonText}>
+      {isFirstTime ? 'Complete Profile' : 'Save Changes'}
+    </Text>
+  )}
+</Pressable>
 
           {isFirstTime && (
             <Text style={styles.requiredNote}>* Required field</Text>
@@ -464,9 +501,15 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   requiredNote: {
-    textAlign: 'center',
-    color: colors.textSecondary,
-    fontSize: 14,
-    marginBottom: 24,
-  },
+  textAlign: 'center',
+  color: colors.textSecondary,
+  fontSize: 14,
+  marginBottom: 24,
+},
+fieldTip: {
+  fontSize: 12,
+  color: colors.textSecondary,
+  marginTop: 6,
+  marginLeft: 4,
+},
 });

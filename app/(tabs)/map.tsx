@@ -74,9 +74,16 @@ export default function MapScreen() {
   const params = useLocalSearchParams();
   const [mapZoomLevel, setMapZoomLevel] = useState<'world' | 'country' | 'city'>('city');
   const [showLegend, setShowLegend] = useState(false);
+  const [isDarkMap, setIsDarkMap] = useState(false);
   const [isPremium, setIsPremium] = useState(false);
   const { trackVideoView } = useAdManager(isPremium);
-  const mountedRef = useRef(true);
+ const mountedRef = useRef(true);
+
+  useEffect(() => {
+    AsyncStorage.getItem('map_theme_dark').then((val) => {
+      if (val === 'true') setIsDarkMap(true);
+    });
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -96,6 +103,22 @@ export default function MapScreen() {
       }
     };
   }, []);
+
+// ⚡ Handle navigation from feed with video location - runs when params change
+  useEffect(() => {
+    if (params.centerLat && params.centerLng && params.fromFeed === 'true') {
+      const centerLat = parseFloat(params.centerLat as string);
+      const centerLng = parseFloat(params.centerLng as string);
+
+      if (!isNaN(centerLat) && !isNaN(centerLng)) {
+        const videoCenter = { latitude: centerLat, longitude: centerLng };
+        if (mountedRef.current) setInitialMapCenter(videoCenter);
+        if (mountedRef.current) setIsGpsReady(true);
+        // Load videos to show the pin
+        loadVideoLocations();
+      }
+    }
+  }, [params.centerLat, params.centerLng, params.fromFeed]);
 
   // Handle deep link to specific request from notification
   useEffect(() => {
@@ -179,14 +202,14 @@ export default function MapScreen() {
         }
       }
 
-    // ⚡ STEP 1: Try to load cached location FIRST
+// ⚡ STEP 1: Try to load cached GPS location FIRST
       let resolvedLocation: { latitude: number; longitude: number } | null = null;
       try {
         const cached = await AsyncStorage.getItem('cached_location');
         if (cached) {
           const cachedData = JSON.parse(cached);
           if (Date.now() - cachedData.timestamp < 86400000) {
-            console.log('✅ Using cached location');
+            console.log('✅ Using cached GPS location');
             resolvedLocation = {
               latitude: cachedData.latitude,
               longitude: cachedData.longitude,
@@ -197,35 +220,75 @@ export default function MapScreen() {
         // ignore cache errors
       }
 
-      // ⚡ STEP 2: If no cache, try user profile location text as hint, fallback to Auckland
+      // ⚡ STEP 2: Try cached default city coordinates
       if (!resolvedLocation) {
-        // Try to get location from user profile
-        if (user) {
+        try {
+          const cachedCity = await AsyncStorage.getItem('default_city_location');
+          if (cachedCity) {
+            const cityData = JSON.parse(cachedCity);
+            console.log('✅ Using cached default city:', cityData.cityName);
+            resolvedLocation = {
+              latitude: cityData.latitude,
+              longitude: cityData.longitude,
+            };
+          }
+        } catch (error) {
+          // ignore cache errors
+        }
+      }
+
+// ⚡ STEP 3: Try geocoding user's profile city live (Nominatim - no permission needed)
+      if (!resolvedLocation && user) {
+        try {
           const { data: userData } = await supabase
             .from('users')
             .select('location')
             .eq('id', user.id)
             .single();
 
-          // location is a text string - we can't geocode it reliably,
-          // so just use Auckland as default for NZ/AU market
-          console.log('📍 User profile location text:', userData?.location || 'not set');
+          if (userData?.location) {
+            console.log('📍 Geocoding profile city:', userData.location);
+            const encodedCity = encodeURIComponent(userData.location);
+            const response = await fetch(
+              `https://nominatim.openstreetmap.org/search?q=${encodedCity}&format=json&limit=1`,
+              { headers: { 'User-Agent': 'POPNOW/1.0' } }
+            );
+            const results = await response.json();
+            if (results && results.length > 0) {
+              const latitude = parseFloat(results[0].lat);
+              const longitude = parseFloat(results[0].lon);
+              resolvedLocation = { latitude, longitude };
+              console.log('✅ Geocoded city coordinates:', resolvedLocation);
+              await AsyncStorage.setItem('default_city_location', JSON.stringify({
+                latitude,
+                longitude,
+                cityName: userData.location,
+                timestamp: Date.now(),
+              }));
+            }
+          }
+        } catch (error) {
+          console.log('⚠️ Geocoding failed:', error);
         }
-
-        resolvedLocation = { latitude: -36.8485, longitude: 174.7633 };
-        console.log('📍 Using Auckland default');
       }
 
-      // ✅ KEY FIX: Set location AND mark GPS ready immediately
-      if (mountedRef.current) setUserLocation(resolvedLocation);
-      if (mountedRef.current) setInitialMapCenter(resolvedLocation);
-      if (mountedRef.current) setHasInitializedMap(true);
-      if (mountedRef.current) setIsGpsReady(true); // ← THIS IS THE FIX
+      // ⚡ STEP 4: Final fallback - world zoom view (no hardcoded city)
+      if (!resolvedLocation) {
+        console.log('⚠️ No location available - showing world view');
+        if (mountedRef.current) setHasInitializedMap(true);
+        if (mountedRef.current) setIsGpsReady(true);
+      } else {
+        // ✅ Set location AND mark GPS ready immediately
+        if (mountedRef.current) setUserLocation(resolvedLocation);
+        if (mountedRef.current) setInitialMapCenter(resolvedLocation);
+        if (mountedRef.current) setHasInitializedMap(true);
+        if (mountedRef.current) setIsGpsReady(true);
+      }
 
-      // ⚡ STEP 3: Load videos in parallel with GPS
+      // ⚡ STEP 5: Load videos in parallel with GPS
       const loadVideosPromise = loadVideoLocations();
 
-      // ⚡ STEP 4: Start GPS in background (non-blocking)
+      // ⚡ STEP 6: Start GPS in background (non-blocking)
       if (!hasRequestedPermission.current) {
         hasRequestedPermission.current = true;
         requestLocationPermission().then((permissionResult) => {
@@ -237,7 +300,6 @@ export default function MapScreen() {
           }
         });
       } else {
-        const Location = require('expo-location');
         const { status } = await Location.getForegroundPermissionsAsync();
         if (status === 'granted') {
           if (mountedRef.current) setLocationDenied(false);
@@ -247,7 +309,7 @@ export default function MapScreen() {
         }
       }
 
-      // ⚡ STEP 5: Wait for videos to load
+      // ⚡ STEP 7: Wait for videos to load
       await loadVideosPromise;
 
       startLocationTracking();
@@ -282,9 +344,8 @@ export default function MapScreen() {
     }
   };
 
-  const getCurrentLocation = async () => {
+const getCurrentLocation = async () => {
     try {
-      if (mountedRef.current) setIsGpsReady(false);
 
       const { status } = await Location.getForegroundPermissionsAsync();
       if (status !== 'granted') {
@@ -803,7 +864,7 @@ const handleAvatarPress = useCallback((userId: string) => {
     );
   }
 
-  return (
+return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaView style={styles.container} edges={['top']}>
         <Pressable onPress={() => router.push('/(tabs)/search')} style={styles.searchButtonTopRight}>
@@ -839,13 +900,14 @@ const handleAvatarPress = useCallback((userId: string) => {
           isGpsReady={isGpsReady}
           locationDenied={locationDenied}
           onZoomChange={setMapZoomLevel}
+          isDarkMode={isDarkMap}
         />
 
         <Pressable
           style={styles.legendButton}
           onPress={() => setShowLegend(!showLegend)}
         >
-          <Text style={styles.legendButtonText}>ⓘ</Text>
+          <Text style={[styles.legendButtonText, { color: isDarkMap ? '#FFFFFF' : '#333333' }]}>ⓘ</Text>
         </Pressable>
 
         {showLegend && (
@@ -878,6 +940,19 @@ const handleAvatarPress = useCallback((userId: string) => {
             </View>
           </View>
         )}
+
+<Pressable
+          style={styles.themeToggleButton}
+          onPress={() => {
+            const newVal = !isDarkMap;
+            setIsDarkMap(newVal);
+            AsyncStorage.setItem('map_theme_dark', String(newVal));
+          }}
+        >
+        <Text style={[styles.themeToggleText, { color: isDarkMap ? '#FFFFFF' : '#333333' }]}>
+            {isDarkMap ? '✺' : '☽'}
+          </Text>
+        </Pressable>
 
         <Pressable
           style={styles.refreshButton}
@@ -1000,14 +1075,23 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000000',
   },
-  legendButton: {
+themeToggleButton: {
+    position: 'absolute',
+    top: 110,
+    right: 20,
+    zIndex: 1001,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  themeToggleText: {
+    fontSize: 22,
+  },
+legendButton: {
     position: 'absolute',
     bottom: 180,
     left: 20,
     width: 44,
     height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 1000,
