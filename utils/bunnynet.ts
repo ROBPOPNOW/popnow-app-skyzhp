@@ -1,5 +1,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { File } from 'expo-file-system';
 import Constants from 'expo-constants';
+import { supabase } from '@/lib/supabase';
 
 // Bunny.net Configuration - Read from app.json extra config
 const BUNNY_STORAGE_ZONE_NAME = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STORAGE_ZONE_NAME || '';
@@ -204,6 +206,176 @@ export async function uploadToStream(
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// TUS resumable upload (key-free) — replaces createStreamVideo()+uploadToStream()
+// as a single call. Uploads directly to Bunny using a short-lived signed token from
+// the `bunny-create-video` Edge Function; no Bunny AccessKey ever touches the client.
+// Ported 1:1 from the verified app/tus-spike.tsx spike. Left createStreamVideo()/
+// uploadToStream() above untouched as a fallback until this is wired in and confirmed.
+// ─────────────────────────────────────────────────────────────────────────
+
+const TUS_CREATE_URL = 'https://video.bunnycdn.com/tusupload';
+const TUS_CHUNK_SIZE = 5 * 1024 * 1024; // 5MB per PATCH — same as the proven spike
+
+function buildTusUploadMetadata(pairs: Record<string, string>): string {
+  return Object.entries(pairs)
+    .map(([key, value]) => `${key} ${btoa(value)}`)
+    .join(',');
+}
+
+export interface TusUploadResult {
+  guid: string;
+  libraryId: number;
+}
+
+export interface TusUploadOptions {
+  isPremium?: boolean;
+  collectionId?: string;
+  mimeType?: string; // defaults to 'video/mp4'
+  /** Fires right after Bunny assigns a video ID, before the byte upload starts —
+   *  lets the caller persist bunny_video_id early for cancel/cleanup safety. */
+  onVideoCreated?: (result: TusUploadResult) => void | Promise<void>;
+  /** Fires after each confirmed chunk. */
+  onProgress?: (bytesUploaded: number, totalBytes: number) => void;
+}
+
+/**
+ * Uploads a video directly to Bunny Stream via the TUS resumable protocol, using a
+ * short-lived signed token from the `bunny-create-video` Supabase Edge Function.
+ * No Bunny AccessKey is ever present on the client.
+ *
+ * Ported 1:1 from the verified app/tus-spike.tsx spike — same 4 steps, same PATCH
+ * headers, same File/FileHandle chunked-read approach, same correctness checks.
+ */
+export async function uploadVideoViaTus(
+  title: string,
+  videoUri: string,
+  options: TusUploadOptions = {}
+): Promise<TusUploadResult> {
+  const { isPremium = false, collectionId, mimeType = 'video/mp4', onVideoCreated, onProgress } = options;
+
+  // Step 1: create the video server-side and get a short-lived TUS upload token
+  console.log('🎬 [TUS] Calling bunny-create-video edge function...');
+  const { data: createData, error: createError } = await supabase.functions.invoke(
+    'bunny-create-video',
+    { body: { title, isPremium, collectionId } }
+  );
+  if (createError) {
+    throw new Error(`bunny-create-video failed: ${createError.message}`);
+  }
+  const { videoId, libraryId, authorizationSignature, authorizationExpire } = createData || {};
+  if (!videoId || !authorizationSignature || !authorizationExpire) {
+    throw new Error(`bunny-create-video returned incomplete data: ${JSON.stringify(createData)}`);
+  }
+  console.log('✅ [TUS] Video created:', videoId, 'libraryId:', libraryId);
+
+  const result: TusUploadResult = { guid: videoId, libraryId: Number(libraryId) };
+  if (onVideoCreated) {
+    await onVideoCreated(result);
+  }
+
+  // Step 2: create the TUS upload resource on Bunny
+  const file = new File(videoUri);
+  const fileSize = file.size;
+
+  console.log('📤 [TUS] Creating TUS upload resource on Bunny...');
+  const uploadMetadata = buildTusUploadMetadata({ filetype: mimeType, title });
+  const createResponse = await fetch(TUS_CREATE_URL, {
+    method: 'POST',
+    headers: {
+      'Tus-Resumable': '1.0.0',
+      'Upload-Length': String(fileSize),
+      'Upload-Metadata': uploadMetadata,
+      'AuthorizationSignature': authorizationSignature,
+      'AuthorizationExpire': String(authorizationExpire),
+      'VideoId': videoId,
+      'LibraryId': String(libraryId),
+    },
+  });
+
+  if (createResponse.status !== 201) {
+    const errText = await createResponse.text();
+    throw new Error(`TUS create failed: ${createResponse.status} ${errText}`);
+  }
+
+  let location = createResponse.headers.get('Location');
+  if (!location) {
+    throw new Error('TUS create response missing Location header');
+  }
+  if (location.startsWith('/')) {
+    location = new URL(location, TUS_CREATE_URL).toString();
+  }
+  console.log('✅ [TUS] Upload resource created:', location);
+
+  // Step 3: chunked PATCH loop using File/FileHandle for byte-range reads
+  console.log(`📤 [TUS] Starting chunked upload — ${fileSize} bytes in ~${Math.ceil(fileSize / TUS_CHUNK_SIZE)} chunks`);
+  const handle = file.open();
+  let offset = 0;
+
+  try {
+    while (offset < fileSize) {
+      const bytesToRead = Math.min(TUS_CHUNK_SIZE, fileSize - offset);
+      handle.offset = offset;
+      const chunk = handle.readBytes(bytesToRead);
+
+      console.log(`  [TUS] readBytes(${bytesToRead}) at offset ${offset} → got ${chunk.byteLength} bytes (chunk.length=${chunk.length})`);
+
+      if (chunk.byteLength === 0) {
+        throw new Error(`readBytes returned 0 bytes at offset ${offset} — aborting to avoid a silent empty-body PATCH`);
+      }
+
+      // Sending `chunk` (Uint8Array) directly, not chunk.buffer — verified against the
+      // installed RN source (Libraries/Network/convertRequestBody.js and
+      // Libraries/Utilities/binaryToBase64.js): a Uint8Array is base64-encoded respecting
+      // its own byteOffset/length, a raw ArrayBuffer is encoded whole with no trimming.
+      // Uint8Array is the byte-exact option here.
+      const patchResponse = await fetch(location, {
+        method: 'PATCH',
+        headers: {
+          'Tus-Resumable': '1.0.0',
+          'Upload-Offset': String(offset),
+          'Content-Type': 'application/offset+octet-stream',
+          'LibraryId': String(libraryId),
+          'VideoId': videoId,
+          'AuthorizationSignature': authorizationSignature,
+          'AuthorizationExpire': String(authorizationExpire),
+        },
+        body: chunk,
+      });
+
+      if (!patchResponse.ok) {
+        const errText = await patchResponse.text();
+        throw new Error(`PATCH failed at offset ${offset}: ${patchResponse.status} ${errText}`);
+      }
+
+      const rawOffsetHeader = patchResponse.headers.get('Upload-Offset');
+      console.log(`  [TUS] PATCH response — status ${patchResponse.status}, raw Upload-Offset header: "${rawOffsetHeader}"`);
+
+      const newOffset = rawOffsetHeader ? parseInt(rawOffsetHeader, 10) : NaN;
+      if (!rawOffsetHeader || Number.isNaN(newOffset)) {
+        throw new Error(`Server response missing/invalid Upload-Offset header (got "${rawOffsetHeader}") — cannot confirm bytes were received`);
+      }
+
+      const expectedOffset = offset + chunk.byteLength;
+      if (newOffset !== expectedOffset) {
+        console.warn(`  [TUS] ⚠️ Offset mismatch — expected ${expectedOffset} (sent ${chunk.byteLength} bytes), server reports ${newOffset}`);
+      }
+      if (newOffset <= offset) {
+        throw new Error(`Server did not advance offset (stuck at ${offset}) — likely an empty or rejected body, aborting`);
+      }
+
+      offset = newOffset;
+      console.log(`  [TUS] ✅ Upload-Offset confirmed: ${offset} / ${fileSize} (${((offset / fileSize) * 100).toFixed(1)}%)`);
+      onProgress?.(offset, fileSize);
+    }
+  } finally {
+    handle.close();
+  }
+
+  console.log('✅ [TUS] Upload complete:', videoId);
+  return result;
+}
+
 /**
  * Get the status of a video in Bunny.net Stream
  * @param videoId - GUID of the video
@@ -242,6 +414,29 @@ export async function getVideoStatus(videoId: string, isPremium: boolean = false
     return data;
   } catch (error: any) {
     console.error('Error getting video status:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get the status of a video via the `bunny-video-status` Edge Function — key-free
+ * equivalent of getVideoStatus() above. Returns the same raw Bunny status JSON shape
+ * (e.g. `status.status === 4` for finished), since the edge function is a pass-through.
+ * Added alongside getVideoStatus(), which is left untouched as a fallback.
+ */
+export async function getVideoStatusViaEdgeFunction(videoId: string, isPremium: boolean = false): Promise<any> {
+  try {
+    const { data, error } = await supabase.functions.invoke('bunny-video-status', {
+      body: { videoId, isPremium },
+    });
+
+    if (error) {
+      throw new Error(`bunny-video-status failed: ${error.message}`);
+    }
+
+    return data;
+  } catch (error: any) {
+    console.error('Error getting video status via edge function:', error);
     throw error;
   }
 }
@@ -495,6 +690,32 @@ let mp4Url = `https://${cdnHostname}/${videoId}/play_${bestResolution}p.mp4`;
 }
 
 /**
+ * Get the direct MP4 download URL via the `bunny-download-url` Edge Function — key-free
+ * equivalent of getVideoDownloadUrl() above. Returns the same CDN mp4 URL shape
+ * (`https://{cdnHostname}/{videoId}/play_{bestResolution}p.mp4`), since the edge function
+ * mirrors the same resolution-selection logic. Note: unlike getVideoDownloadUrl(), this has
+ * no useTokenAuth support — acceptable because neither current caller passes useTokenAuth,
+ * so both paths already produce token-less URLs. Error messages are shorter/plainer here than
+ * getVideoDownloadUrl()'s MP4-Fallback-setup instructions; that's an accepted UX downgrade on
+ * the failure path only, not a functional gap.
+ * Added alongside getVideoDownloadUrl(), which is left untouched as a fallback.
+ */
+export async function getDownloadUrlViaEdgeFunction(videoUrl: string, isPremium: boolean = false): Promise<string> {
+  const { data, error } = await supabase.functions.invoke('bunny-download-url', {
+    body: { videoUrl, isPremium },
+  });
+
+  if (error) {
+    throw new Error(`bunny-download-url failed: ${error.message}`);
+  }
+  if (data?.error) {
+    throw new Error(`bunny-download-url failed: ${data.error}`);
+  }
+
+  return data.downloadUrl;
+}
+
+/**
  * Get the thumbnail URL for a video in Bunny.net Stream
  * @param videoId - GUID of the video
  * @param libraryId - Library ID (517995=Free, 597832=Premium) - optional, defaults to Free
@@ -569,5 +790,25 @@ export async function deleteStreamVideo(videoId: string, isPremium: boolean = fa
   } catch (error: any) {
     console.error('❌ Error deleting video from Bunny.net:', error);
     throw error;
+  }
+}
+
+/**
+ * Delete a video from Bunny.net Stream via the `bunny-delete-video` Edge Function — key-free
+ * equivalent of deleteStreamVideo() above. The edge function verifies the caller owns the
+ * video (via pending_uploads/videos rows) before deleting, and treats a 404 from Bunny as
+ * success, same as deleteStreamVideo() does.
+ * Added alongside deleteStreamVideo(), which is left untouched as a fallback.
+ */
+export async function getDeleteVideoViaEdgeFunction(videoId: string, isPremium: boolean = false): Promise<void> {
+  const { data, error } = await supabase.functions.invoke('bunny-delete-video', {
+    body: { videoId, isPremium },
+  });
+
+  if (error) {
+    throw new Error(`bunny-delete-video failed: ${error.message}`);
+  }
+  if (data?.error) {
+    throw new Error(`bunny-delete-video failed: ${data.error}`);
   }
 }

@@ -8,8 +8,9 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { IconSymbol } from '@/components/IconSymbol';
 import * as MediaLibrary from 'expo-media-library';
 import VideoFeedItem from '@/components/VideoFeedItem';
-import { getVideoPlaybackUrl, getVideoThumbnailUrl, getVideoDownloadUrl, deleteStreamVideo, extractVideoId } from '@/utils/bunnynet';
+import { getVideoPlaybackUrl, getVideoThumbnailUrl, getVideoDownloadUrl, getDownloadUrlViaEdgeFunction, deleteStreamVideo, getDeleteVideoViaEdgeFunction, extractVideoId } from '@/utils/bunnynet';
 import { supabase } from '@/lib/supabase';
+import { USE_TUS_UPLOAD, USE_EDGE_STATUS_CHECK, USE_EDGE_DELETE, USE_EDGE_DOWNLOAD } from '@/config/uploadFlags';
 import { colors } from '@/styles/commonStyles';
 import { requestMediaLibraryPermission, requestMediaLibrarySavePermission } from '@/utils/permissions';
 import { File, Directory, Paths } from 'expo-file-system';
@@ -25,6 +26,7 @@ import { useCoinBalance } from '@/hooks/useCoinBalance';
 import { checkAndAwardDailyBonus } from '@/utils/coins';
 import { useFocusEffect } from 'expo-router';
 import { PremiumAvatar } from '@/components/PremiumAvatar';
+import FloatingTabBar, { TabBarItem } from '@/components/FloatingTabBar';
 import {
   View,
   Text,
@@ -69,7 +71,7 @@ const navigateToVideoOrProfile = async (videoId: string, actorId: string | undef
     }
     
     const videoAge = Date.now() - new Date(video.created_at).getTime();
-    const oneHourInMs = 60 * 60 * 1000;
+    const oneHourInMs = 24 * 60 * 60 * 1000;
     const isExpired = videoAge > oneHourInMs;
     const isRejected = video.moderation_status === 'rejected';
     
@@ -144,6 +146,8 @@ const router = useRouter();
   const requestTimerRef = useRef<number | null>(null);
   const expiryTimerRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
+  const [showDeletionBanner, setShowDeletionBanner] = useState(false);
+  const retryInProgressRef = useRef(false);
 
 // 🔧 FIX: Reload requests when returning to profile
 useFocusEffect(
@@ -205,14 +209,6 @@ useEffect(() => {
       loadPendingUploads();
     }
   }, [activeTab]);
-
-// Add this AFTER your existing useEffect blocks (around line 115)
-useEffect(() => {
-  if (params.refresh === 'true' || params.reload === 'true') {
-    console.log('🔄 Refresh triggered from navigation - reloading requests');
-    loadMyRequests();
-  }
-}, [params.refresh, params.reload]);
 
 // Auto-refresh pending uploads every 5 seconds (background)
 useEffect(() => {
@@ -353,7 +349,7 @@ useEffect(() => {
     mounted = false;
     console.log('🔕 Removing real-time listener');
     if (subscription) {
-      subscription.unsubscribe();
+      supabase.removeChannel(subscription);
     }
   };
 }, [activeTab]);
@@ -391,18 +387,34 @@ useEffect(() => {
   };
 
 const loadPendingUploads = async () => {
+  // Don't overwrite UI during active retry
+  if (retryInProgressRef.current) return;
+
   try {
     setLoading(true);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
+    // Auto-mark stale uploading records as failed
+    // Any record stuck at uploading/processing for > 2 minutes is considered failed
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    await supabase
+      .from('pending_uploads')
+      .update({
+        status: 'failed',
+        upload_progress: 0,
+        error_message: 'Upload failed. Tap retry to try again.',
+      })
+      .eq('user_id', user.id)
+      .in('status', ['uploading', 'processing'])
+      .lt('updated_at', twoMinutesAgo);
+
     // Get pending uploads from pending_uploads table
-    // These show upload progress and moderation status
     const { data, error } = await supabase
       .from('pending_uploads')
       .select('*')
       .eq('user_id', user.id)
-      .in('status', ['uploading', 'processing', 'moderating'])
+      .in('status', ['uploading', 'processing', 'moderating', 'failed'])
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -419,27 +431,40 @@ const loadPendingUploads = async () => {
 
 // Background refresh without loading indicator
 const loadPendingUploadsInBackground = async () => {
+  // Don't overwrite UI during active retry
+  if (retryInProgressRef.current) return true;
+
   try {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
+
+    // Auto-mark stale uploading records as failed
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    await supabase
+      .from('pending_uploads')
+      .update({
+        status: 'failed',
+        upload_progress: 0,
+        error_message: 'Upload failed. Tap retry to try again.',
+      })
+      .eq('user_id', user.id)
+      .in('status', ['uploading', 'processing'])
+      .lt('updated_at', twoMinutesAgo);
 
     // Fetch without showing loading state
     const { data, error } = await supabase
       .from('pending_uploads')
       .select('*')
       .eq('user_id', user.id)
-      .in('status', ['uploading', 'processing', 'moderating'])
+      .in('status', ['uploading', 'processing', 'moderating', 'failed'])
       .order('created_at', { ascending: false });
 
     if (error) {
       console.error('Background refresh error:', error);
-      return false; // Return false if error
+      return false;
     }
 
-    // Update state
     setPendingUploads(data || []);
-    
-    // Return true if there are pending uploads, false if empty
     return (data && data.length > 0);
     
   } catch (error) {
@@ -447,6 +472,210 @@ const loadPendingUploadsInBackground = async () => {
     return false;
   }
 };
+
+const handleRetryUpload = async (upload: any) => {
+  try {
+    console.log('🔄 Retrying failed upload:', upload.id);
+
+    // Block background refresh from overwriting optimistic update
+    retryInProgressRef.current = true;
+
+    // Optimistically update UI immediately so badge changes to Uploading
+    setPendingUploads(prev => prev.map(p =>
+      p.id === upload.id
+        ? { ...p, status: 'uploading', upload_progress: 10, error_message: null }
+        : p
+    ));
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      Alert.alert('Error', 'You must be logged in to retry');
+      return;
+    }
+
+    // Check if the original video file still exists
+    const fileInfo = await FileSystem.getInfoAsync(upload.video_uri);
+    
+    if (!fileInfo.exists) {
+      Alert.alert(
+        'Video File Not Found',
+        'The original video file is no longer available. Please record a new video.',
+        [{ text: 'OK' }]
+      );
+      // Clean up the failed record
+      await supabase.from('pending_uploads').delete().eq('id', upload.id);
+      loadPendingUploads();
+      return;
+    }
+
+    // Reset to uploading status
+    await supabase
+      .from('pending_uploads')
+      .update({ 
+        status: 'uploading',
+        upload_progress: 10,
+        error_message: null,
+        bunny_video_id: null,
+      })
+      .eq('id', upload.id);
+
+    console.log('✅ Retrying upload for:', upload.caption);
+
+    // Dynamically import bunnynet utils and restart upload
+    const bunnynet = await import('@/utils/bunnynet');
+    const { data: userData } = await supabase
+      .from('users')
+      .select('is_premium')
+      .eq('id', user.id)
+      .single();
+
+    const isPremium = userData?.is_premium || false;
+
+    let bunnyVideoId: string | null = null;
+
+    if (USE_TUS_UPLOAD) {
+      // ── NEW: key-free TUS path (utils/bunnynet.ts → uploadVideoViaTus) ──
+      await bunnynet.uploadVideoViaTus(upload.caption, upload.video_uri, {
+        isPremium,
+        onVideoCreated: async (created) => {
+          bunnyVideoId = created.guid;
+          console.log('✅ Video created with ID:', bunnyVideoId);
+          setPendingUploads(prev => prev.map(p =>
+            p.id === upload.id
+              ? { ...p, bunny_video_id: bunnyVideoId, upload_progress: 20 }
+              : p
+          ));
+          await supabase
+            .from('pending_uploads')
+            .update({ bunny_video_id: bunnyVideoId, upload_progress: 20 })
+            .eq('id', upload.id);
+        },
+        onProgress: async (uploaded, total) => {
+          const pct = 20 + Math.round((uploaded / total) * 40);
+          setPendingUploads(prev => prev.map(p =>
+            p.id === upload.id
+              ? { ...p, upload_progress: pct }
+              : p
+          ));
+          await supabase.from('pending_uploads').update({ upload_progress: pct }).eq('id', upload.id);
+        },
+      });
+    } else {
+      // ── OLD: direct-key path (fallback, unchanged) ──
+      // Step 1: Create new video on Bunny
+      const videoData = await bunnynet.createStreamVideo(upload.caption, isPremium);
+      bunnyVideoId = videoData.guid;
+
+      await supabase
+        .from('pending_uploads')
+        .update({ bunny_video_id: bunnyVideoId, upload_progress: 20 })
+        .eq('id', upload.id);
+
+      // Step 2: Upload file
+      await bunnynet.uploadToStream(bunnyVideoId, upload.video_uri, isPremium);
+    }
+
+    await supabase
+      .from('pending_uploads')
+      .update({ upload_progress: 60, status: 'processing' })
+      .eq('id', upload.id);
+
+    // Step 3: Wait for processing
+    let processed = false;
+    let attempts = 0;
+    while (!processed && attempts < 120) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const status = USE_EDGE_STATUS_CHECK
+        ? await bunnynet.getVideoStatusViaEdgeFunction(bunnyVideoId, isPremium)
+        : await bunnynet.getVideoStatus(bunnyVideoId, isPremium);
+      if (status.status === 4) {
+        processed = true;
+      } else if (status.status === 5 || status.status === 6) {
+        throw new Error('Video processing failed on Bunny.net');
+      }
+      attempts++;
+      const processingPct = Math.min(60 + attempts, 90);
+      setPendingUploads(prev => prev.map(p =>
+        p.id === upload.id
+          ? { ...p, upload_progress: processingPct }
+          : p
+      ));
+      await supabase
+        .from('pending_uploads')
+        .update({ upload_progress: processingPct })
+        .eq('id', upload.id);
+    }
+
+    if (!processed) throw new Error('Processing timeout');
+
+    // Step 4: Save to database
+    await supabase
+      .from('pending_uploads')
+      .update({ upload_progress: 95 })
+      .eq('id', upload.id);
+
+    const libraryId = isPremium ? 597832 : 517995;
+    const cdnHostname = isPremium
+      ? 'vz-bf878a45-f2f.b-cdn.net'
+      : 'vz-60af4a59-0b4.b-cdn.net';
+
+    const { data: video, error: dbError } = await supabase
+      .from('videos')
+      .insert({
+        user_id: user.id,
+        video_url: bunnyVideoId,
+        thumbnail_url: `https://${cdnHostname}/${bunnyVideoId}/thumbnail.jpg`,
+        caption: upload.caption,
+        tags: upload.tags || [],
+        location_latitude: upload.location_latitude,
+        location_longitude: upload.location_longitude,
+        location_name: upload.location_name,
+        location_privacy: upload.location_privacy,
+        moderation_status: 'pending',
+        is_approved: false,
+        request_id: upload.request_id || null,
+        library_id: libraryId,
+      })
+      .select()
+      .single();
+
+    if (dbError) throw new Error('Failed to save video to database');
+
+    // Step 5: Delete pending record
+    await supabase.from('pending_uploads').delete().eq('id', upload.id);
+
+    // Step 6: Trigger moderation
+    supabase.functions.invoke('moderate-video', {
+      body: {
+        videoId: video.id,
+        videoUrl: bunnyVideoId,
+        thumbnailUrl: `https://${cdnHostname}/${bunnyVideoId}/thumbnail.jpg`,
+        userId: user.id,
+        requestId: upload.request_id || null,
+      },
+    }).catch(console.error);
+
+    console.log('✅ Retry upload completed successfully');
+    retryInProgressRef.current = false;
+    loadPendingUploads();
+
+  } catch (error: any) {
+    console.error('❌ Retry failed:', error);
+    retryInProgressRef.current = false;
+    // Mark as failed again
+    await supabase
+      .from('pending_uploads')
+      .update({ 
+        status: 'failed',
+        upload_progress: 0,
+        error_message: error.message,
+      })
+      .eq('id', upload.id);
+    loadPendingUploads();
+    Alert.alert('Retry Failed', 'Upload failed again. Please try again later.');
+  }
+};
+
 // 🪙 CHECK AND AWARD DAILY BONUS
 const checkDailyBonus = async () => {
   try {
@@ -493,7 +722,11 @@ const checkDailyBonus = async () => {
   if (bunnyVideoId) {
     try {
       const isPremium = rejectedVideo.library_id === 597832;
-      await deleteStreamVideo(bunnyVideoId, isPremium);
+      if (USE_EDGE_DELETE) {
+        await getDeleteVideoViaEdgeFunction(bunnyVideoId, isPremium);
+      } else {
+        await deleteStreamVideo(bunnyVideoId, isPremium);
+      }
       console.log('✅ Rejected video deleted from Bunny.net');
     } catch (deleteError) {
       console.error('❌ Error deleting rejected video from Bunny.net:', deleteError);
@@ -696,11 +929,15 @@ const loadLikedVideos = async () => {
     console.log('=== LOADING LIKED VIDEOS ===');
     console.log('User ID:', user.id);
 
-    // 🚨 CRITICAL: Fresh query for likes (no cache)
+    // Only fetch likes from last 3 days — videos auto-delete after 3 days
+    const threeDaysAgo = new Date();
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+
     const { data: likesData, error: likesError } = await supabase
       .from('likes')
       .select('video_id, created_at')
       .eq('user_id', user.id)
+      .gte('created_at', threeDaysAgo.toISOString())
       .order('created_at', { ascending: false });
 
     if (likesError) {
@@ -1695,21 +1932,6 @@ const uploadAvatar = async (uri: string) => {
         console.log('✅ Rejected avatar deleted from storage');
       }
       
-      // RESTORE previous avatar in database
-      console.log('🔄 Restoring previous avatar...');
-      if (previousAvatarUrl) {
-        const { error: restoreError } = await supabase
-          .from('users')
-          .update({ avatar_url: previousAvatarUrl })
-          .eq('id', user.id);
-        
-        if (restoreError) {
-          console.error('Error restoring previous avatar:', restoreError);
-        } else {
-          console.log('✅ Previous avatar restored');
-        }
-      }
-      
       // Update local state with previous avatar
       setProfile({ ...profile, avatar_url: previousAvatarUrl });
       
@@ -1821,8 +2043,11 @@ const handleSaveVideo = async (videoUrl: string, videoId: string, libraryId?: nu
       return;
     }
 
-    const downloadUrl = await getVideoDownloadUrl(videoUrl, libraryId);
-    
+    const isPremium = libraryId === 597832;
+    const downloadUrl = USE_EDGE_DOWNLOAD
+      ? await getDownloadUrlViaEdgeFunction(videoUrl, isPremium)
+      : await getVideoDownloadUrl(videoUrl, libraryId);
+
     const timestamp = Date.now();
     const randomSuffix = Math.random().toString(36).substring(2, 8);
     const videoIdShort = videoId.substring(0, 8);
@@ -1892,7 +2117,11 @@ const handleSaveVideo = async (videoUrl: string, videoId: string, libraryId?: nu
                 const bunnyVideoId = extractVideoId(video.video_url);
                 if (bunnyVideoId) {
                   const isPremium = video.library_id === 597832;
-await deleteStreamVideo(bunnyVideoId, isPremium);
+if (USE_EDGE_DELETE) {
+  await getDeleteVideoViaEdgeFunction(bunnyVideoId, isPremium);
+} else {
+  await deleteStreamVideo(bunnyVideoId, isPremium);
+}
                 }
               }
 
@@ -2015,12 +2244,15 @@ const handleLike = async (videoId: string) => {
   }
 };
 
-  const handleVideoPress = (video: VideoPost, index: number, videoList: VideoPost[]) => {
-    setSelectedVideo(video);
-    setSelectedVideoIndex(index);
-    setCurrentVideoList(videoList);
-    setVideoModalVisible(true);
-  };
+const handleVideoPress = (video: VideoPost, index: number, videoList: VideoPost[]) => {
+  router.push({
+    pathname: '/search-video-player',
+    params: {
+      videoIds: JSON.stringify([video.id]),
+      startIndex: '0',
+    },
+  });
+};
 
   const handleCloseVideoModal = () => {
     setVideoModalVisible(false);
@@ -2102,7 +2334,11 @@ const handleLike = async (videoId: string) => {
                   const bunnyVideoId = extractVideoId(video.video_url);
                   if (bunnyVideoId) {
                     const isPremium = video.library_id === 597832;
-await deleteStreamVideo(bunnyVideoId, isPremium);
+if (USE_EDGE_DELETE) {
+  await getDeleteVideoViaEdgeFunction(bunnyVideoId, isPremium);
+} else {
+  await deleteStreamVideo(bunnyVideoId, isPremium);
+}
                   }
                 }
 
@@ -2580,14 +2816,18 @@ console.log('📋 Request Card:', {
   const uploadCaptionText = upload.caption || 'Untitled';
   
   // Determine status text based on upload status
-  let uploadStatusText = 'Processing...';
-  if (upload.status === 'uploading') {
-    uploadStatusText = 'Uploading...';
-  } else if (upload.status === 'processing') {
-    uploadStatusText = 'Processing video...';
-  } else if (upload.status === 'moderating') {
-    uploadStatusText = 'Checking content...';
-  }
+let uploadStatusText = 'Processing...';
+if (upload.status === 'uploading') {
+  uploadStatusText = 'Uploading...';
+} else if (upload.status === 'processing') {
+  uploadStatusText = 'Processing video...';
+} else if (upload.status === 'moderating') {
+  uploadStatusText = 'Checking content...';
+} else if (upload.status === 'failed') {
+  uploadStatusText = 'Upload Failed';
+}
+
+const isFailed = upload.status === 'failed';
   
   const uploadDateText = formatDate(upload.created_at);
   const uploadProgress = upload.upload_progress || 0;
@@ -2606,14 +2846,29 @@ console.log('📋 Request Card:', {
   <View style={[styles.progressBar, { width: `${uploadProgress}%` }]} />
 </View>
 <Text style={styles.progressText}>{uploadProgress}%</Text>
-        <View
-          style={[
-            styles.statusBadge,
-            { backgroundColor: '#FFA500' }, // Orange for processing
-          ]}
-        >
-          <Text style={styles.statusText}>{uploadStatusText}</Text>
-        </View>
+<View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+  <View
+    style={[
+      styles.statusBadge,
+      { backgroundColor: isFailed ? '#F44336' : '#FFA500' },
+    ]}
+  >
+    <Text style={styles.statusText}>{uploadStatusText}</Text>
+  </View>
+  {isFailed && (
+    <Pressable
+      onPress={() => handleRetryUpload(upload)}
+      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+    >
+      <IconSymbol
+        ios_icon_name="arrow.clockwise.circle.fill"
+        android_material_icon_name="refresh"
+        size={24}
+        color="#F44336"
+      />
+    </Pressable>
+  )}
+</View>
       </View>
 
       <Text style={styles.pendingDate}>{uploadDateText}</Text>
@@ -2631,103 +2886,97 @@ console.log('📋 Request Card:', {
           </ScrollView>
         );
 
-      case 'liked':
-  if (likedVideos.length === 0) {
-    return (
-      <View style={styles.emptyContainer}>
-        <IconSymbol
-          ios_icon_name="heart.slash"
-          android_material_icon_name="heart-broken"
-          size={64}
-          color={colors.textSecondary}
-        />
-        <Text style={styles.emptyText}>No liked videos</Text>
-        <Text style={styles.emptySubtext}>Videos you like will appear here</Text>
-      </View>
-    );
-  }
-
-  return (
-    <View style={styles.videosContainer}>
-      <FlatList
-        data={likedVideos}
-        renderItem={({ item: video, index }) => {
-          const likesCountText = formatCount(video.likes_count || 0);
-          const commentsCountText = formatCount(video.comments_count || 0);
-          const sharesCountText = formatCount(video.shares_count || 0);
-
+     case 'liked':
+        if (likedVideos.length === 0) {
           return (
-            <Pressable
-              key={video.id}
-              style={({ pressed }) => [
-                styles.videoCard,
-                pressed && styles.cardPressed,
-              ]}
-              onPress={() => handleVideoPress(video, index, likedVideos)}
-            >
-              <Image
-                source={{ uri: getVideoThumbnailUrl(video.video_url || '', video.library_id) }}
-                style={styles.videoThumbnail}
+            <View style={styles.emptyContainer}>
+              <IconSymbol
+                ios_icon_name="heart.slash"
+                android_material_icon_name="heart-broken"
+                size={64}
+                color={colors.textSecondary}
               />
-
-              <View style={styles.videoCardInfo}>
-                <View style={styles.videoStats}>
-                  <View style={styles.videoStat}>
-                    <IconSymbol
-                      ios_icon_name="heart.fill"
-                      android_material_icon_name="favorite"
-                      size={16}
-                      color={colors.textSecondary}
-                    />
-                    <Text style={styles.videoStatText}>{likesCountText}</Text>
-                  </View>
-
-                  <View style={styles.videoStat}>
-                    <IconSymbol
-                      ios_icon_name="bubble.left.fill"
-                      android_material_icon_name="chat-bubble"
-                      size={16}
-                      color={colors.textSecondary}
-                    />
-                    <Text style={styles.videoStatText}>{commentsCountText}</Text>
-                  </View>
-
-                  <View style={styles.videoStat}>
-                    <IconSymbol
-                      ios_icon_name="arrowshape.turn.up.right.fill"
-                      android_material_icon_name="share"
-                      size={16}
-                      color={colors.textSecondary}
-                    />
-                    <Text style={styles.videoStatText}>{sharesCountText}</Text>
-                  </View>
-                </View>
-
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.unlikeButton,
-                    pressed && styles.actionButtonPressed,
-                  ]}
-                  onPress={() => handleUnlikeVideo(video.id)}
-                >
-                  <IconSymbol
-                    ios_icon_name="heart.slash.fill"
-                    android_material_icon_name="heart-broken"
-                    size={24}
-                    color="#F44336"
-                  />
-                </Pressable>
-              </View>
-            </Pressable>
+              <Text style={styles.emptyText}>No liked videos</Text>
+              <Text style={styles.emptySubtext}>Videos you like will appear here</Text>
+            </View>
           );
-        }}
-        keyExtractor={(item) => item.id}
-        numColumns={3}
-        contentContainerStyle={styles.videosGrid}
-        columnWrapperStyle={{ gap: 12 }}
-      />
-    </View>
-  );
+        }
+
+        return (
+          <View style={styles.videosContainer}>
+            <FlatList
+              data={likedVideos}
+              renderItem={({ item: video }) => {
+                const likesCountText = formatCount(video.likes_count || 0);
+                const commentsCountText = formatCount(video.comments_count || 0);
+                return (
+                  <Pressable
+                    key={video.id}
+                    style={({ pressed }) => [
+                      styles.videoCard,
+                      pressed && styles.cardPressed,
+                    ]}
+                    onPress={() => {
+                      // Navigate to single video player — no list passed
+                      router.push({
+                        pathname: '/search-video-player',
+                        params: {
+                          videoIds: JSON.stringify([video.id]),
+                          startIndex: '0',
+                        },
+                      });
+                    }}
+                  >
+                    <View style={{ position: 'relative' }}>
+                      <Image
+                        source={{ uri: getVideoThumbnailUrl(video.video_url || '', video.library_id) }}
+                        style={styles.videoThumbnail}
+                      />
+                      <Pressable
+                        style={styles.likedVideoUnlikeButton}
+                        onPress={() => handleUnlikeVideo(video.id)}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      >
+                        <IconSymbol
+                          ios_icon_name="xmark.circle.fill"
+                          android_material_icon_name="cancel"
+                          size={22}
+                          color="#FFFFFF"
+                        />
+                      </Pressable>
+                    </View>
+                    <View style={styles.videoCardInfo}>
+                      <View style={styles.videoStats}>
+                        <View style={styles.videoStat}>
+                          <IconSymbol
+                            ios_icon_name="heart.fill"
+                            android_material_icon_name="favorite"
+                            size={16}
+                            color={colors.textSecondary}
+                          />
+                          <Text style={styles.videoStatText}>{likesCountText}</Text>
+                        </View>
+                        <View style={styles.videoStat}>
+                          <IconSymbol
+                            ios_icon_name="bubble.left.fill"
+                            android_material_icon_name="chat-bubble"
+                            size={16}
+                            color={colors.textSecondary}
+                          />
+                          <Text style={styles.videoStatText}>{commentsCountText}</Text>
+                        </View>
+                      </View>
+                    </View>
+                  </Pressable>
+                );
+              }}
+              keyExtractor={(item) => item.id}
+              numColumns={3}
+              contentContainerStyle={styles.videosGrid}
+              columnWrapperStyle={{ gap: 12 }}
+            />
+          </View>
+        );
 
       case 'requests':
         if (myRequests.length === 0) {
@@ -2842,6 +3091,14 @@ console.log('📋 Request Card:', {
     );
   }
 
+const tabs: TabBarItem[] = [
+  { name: 'explore', route: '/(tabs)/(home)/', icon: 'binoculars.fill', label: 'Explore' },
+  { name: 'map', route: '/(tabs)/map', icon: 'map.fill', label: 'Map' },
+  { name: 'upload', route: '/record-video', icon: 'plus', label: 'Upload', isUpload: true },
+  { name: 'request', route: '/(tabs)/request', icon: 'hand.raised.fill', label: 'Request' },
+  { name: 'profile', route: '/(tabs)/profile', icon: 'person.fill', label: 'Profile' },
+];
+
   const displayNameText = `@${profile.username}`;
   const usernameText = `@${profile.username}`;
   const bioText = profile.bio || '';
@@ -2868,6 +3125,11 @@ console.log('📋 Request Card:', {
       <View style={{ flex: 1 }}>
           {/* Profile Header - Horizontal Layout */}
           <View style={styles.header}>
+
+            {/* TEMP DEBUG BUTTON — remove together with app/tus-spike.tsx when done */}
+            <Pressable onPress={() => router.push('/tus-spike')} style={{ position: 'absolute', top: 8, left: 8, zIndex: 999, backgroundColor: '#2563eb', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 }}>
+              <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>TUS Spike</Text>
+            </Pressable>
 
             {/* 🪙 COIN BALANCE - Top Right Corner */}
 <Pressable 
@@ -2975,13 +3237,13 @@ console.log('📋 Request Card:', {
           {/* Tabs */}
           <View style={styles.tabs}>
             <Pressable
-              style={[styles.tab, activeTab === 'videos' && styles.activeTab]}
+              style={[styles.tab, activeTab === 'videos' && styles.activeTabStyle]}
               onPress={() => setActiveTab('videos')}
             >
               <IconSymbol
                 ios_icon_name="play.rectangle.fill"
                 android_material_icon_name="videocam"
-                size={24}
+                size={20}
                 color={activeTab === 'videos' ? colors.primary : colors.textSecondary}
               />
               <Text
@@ -2995,13 +3257,13 @@ console.log('📋 Request Card:', {
             </Pressable>
 
             <Pressable
-              style={[styles.tab, activeTab === 'pending' && styles.activeTab]}
+              style={[styles.tab, activeTab === 'pending' && styles.activeTabStyle]}
               onPress={() => setActiveTab('pending')}
             >
               <IconSymbol
                 ios_icon_name="clock.fill"
                 android_material_icon_name="schedule"
-                size={24}
+                size={20}
                 color={activeTab === 'pending' ? colors.primary : colors.textSecondary}
               />
               <Text
@@ -3015,13 +3277,13 @@ console.log('📋 Request Card:', {
             </Pressable>
 
             <Pressable
-              style={[styles.tab, activeTab === 'liked' && styles.activeTab]}
+              style={[styles.tab, activeTab === 'liked' && styles.activeTabStyle]}
               onPress={() => setActiveTab('liked')}
             >
               <IconSymbol
                 ios_icon_name="heart.fill"
                 android_material_icon_name="favorite"
-                size={24}
+                size={20}
                 color={activeTab === 'liked' ? colors.primary : colors.textSecondary}
               />
               <Text
@@ -3035,13 +3297,13 @@ console.log('📋 Request Card:', {
             </Pressable>
 
             <Pressable
-              style={[styles.tab, activeTab === 'requests' && styles.activeTab]}
+              style={[styles.tab, activeTab === 'requests' && styles.activeTabStyle]}
               onPress={() => setActiveTab('requests')}
             >
               <IconSymbol
-                ios_icon_name="questionmark.circle.fill"
-                android_material_icon_name="help"
-                size={24}
+                ios_icon_name="hand.raised.fill"
+                android_material_icon_name="pan-tool"
+                size={18}
                 color={activeTab === 'requests' ? colors.primary : colors.textSecondary}
               />
               <Text
@@ -3055,14 +3317,14 @@ console.log('📋 Request Card:', {
             </Pressable>
 
             <Pressable
-              style={[styles.tab, activeTab === 'notifications' && styles.activeTab]}
+              style={[styles.tab, activeTab === 'notifications' && styles.activeTabStyle]}
               onPress={() => setActiveTab('notifications')}
             >
               <View>
                 <IconSymbol
                   ios_icon_name="bell.fill"
                   android_material_icon_name="notifications"
-                  size={24}
+                  size={20}
                   color={activeTab === 'notifications' ? colors.primary : colors.textSecondary}
                 />
                 {unreadNotificationsCount > 0 && (
@@ -3082,32 +3344,33 @@ console.log('📋 Request Card:', {
             </Pressable>
           </View>
 
-          {/* Select Mode Toggle */}
-          {activeTab === 'videos' && videos.length > 0 && !isSelectMode && (
-            <View style={styles.selectModeContainer}>
-              <Pressable style={styles.selectModeButton} onPress={toggleSelectMode}>
-                <IconSymbol
-                  ios_icon_name="checkmark.circle"
-                  android_material_icon_name="check-circle"
-                  size={20}
-                  color={colors.primary}
-                />
-                <Text style={styles.selectModeText}>Select</Text>
-              </Pressable>
-            </View>
-          )}
-{/* ⏳ ADD THE BANNER HERE */}
 {activeTab === 'videos' && videos.length > 0 && (
-  <View style={styles.videoDeletionBanner}>
-    <IconSymbol
-      ios_icon_name="clock.fill"
-      android_material_icon_name="schedule"
-      size={20}
-      color="#FF9800"
-    />
-    <Text style={styles.videoDeletionText}>
-      ⏳ All videos auto-delete after 3 days. Download them now to save your precious memories forever!
-    </Text>
+  <View>
+    <Pressable
+      style={styles.videoDeletionToggle}
+      onPress={() => setShowDeletionBanner(!showDeletionBanner)}
+    >
+      <IconSymbol
+        ios_icon_name="clock.fill"
+        android_material_icon_name="schedule"
+        size={12}
+        color="#fdfcfb"
+      />
+      <Text style={styles.videoDeletionToggleText}>Auto-delete after 3 days</Text>
+      <IconSymbol
+        ios_icon_name={showDeletionBanner ? 'chevron.up' : 'chevron.down'}
+        android_material_icon_name={showDeletionBanner ? 'expand-less' : 'expand-more'}
+        size={12}
+        color="#ffffff"
+      />
+    </Pressable>
+    {showDeletionBanner && (
+      <View style={styles.videoDeletionBanner}>
+        <Text style={styles.videoDeletionText}>
+          Download your videos before they're gone. All videos are automatically deleted 3 days after upload.
+        </Text>
+      </View>
+    )}
   </View>
 )}
           {/* Content */}
@@ -3177,14 +3440,9 @@ console.log('📋 Request Card:', {
         </Modal>
 
         {/* Video Modal */}
-        <Modal
-          visible={videoModalVisible}
-          animationType="fade"
-          presentationStyle="fullScreen"
-          onRequestClose={handleCloseVideoModal}
-        >
-          <View style={styles.videoModalContainer}>
-            <Pressable style={styles.closeButton} onPress={handleCloseVideoModal}>
+        {videoModalVisible && (
+          <View style={[styles.videoModalContainer, { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 999 }]}>
+    <Pressable style={styles.closeButton} onPress={handleCloseVideoModal}>
               <IconSymbol
                 ios_icon_name="xmark.circle.fill"
                 android_material_icon_name="close"
@@ -3236,10 +3494,10 @@ setTimeout(() => {
                 viewabilityConfig={{
                   itemVisiblePercentThreshold: 50,
                 }}
-             />
+/>
             )}
           </View>
-        </Modal>
+        )}
 
         {/* 🪙 DAILY BONUS POPUP - ADDED */}
         <DailyBonusPopup
@@ -3272,7 +3530,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   header: {
-  padding: 20,
+  padding: 12,
   paddingTop: 10,
   position: 'relative', // ← ADD: Makes absolute positioning work properly
 },
@@ -3340,43 +3598,43 @@ username: {
     flexWrap: 'wrap',  // ← ADD THIS
     justifyContent: 'space-around',
     width: '100%',
-    marginBottom: 20,
-    paddingHorizontal: 10,
-    rowGap: 12,
+    marginBottom: 4,
+    paddingHorizontal: 4,
+    rowGap: 6,
   },
   stat: {
     alignItems: 'center',
   },
   statValue: {
-    fontSize: 18,
+    fontSize: 14,
     fontWeight: 'bold',
     color: colors.text,
   },
   statLabel: {
-    fontSize: 11,
+    fontSize: 10,
     color: colors.textSecondary,
     marginTop: 2,
   },
-  tabs: {
+ tabs: {
     flexDirection: 'row',
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
-    paddingHorizontal: 10,
+    paddingHorizontal: 4,
   },
   tab: {
     flex: 1,
     alignItems: 'center',
-    paddingVertical: 12,
+    paddingVertical: 6,
     borderBottomWidth: 2,
     borderBottomColor: 'transparent',
   },
-  activeTab: {
+  activeTabStyle: {
     borderBottomColor: colors.primary,
   },
   tabText: {
-    fontSize: 12,
+    fontSize: 11,
     color: colors.textSecondary,
-    marginTop: 4,
+    marginTop: 2,
   },
   activeTabText: {
     color: colors.primary,
@@ -3557,6 +3815,14 @@ username: {
   unlikeButton: {
     alignSelf: 'center',
     padding: 8,
+  },
+  likedVideoUnlikeButton: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 12,
+    zIndex: 10,
   },
   pendingContainer: {
     padding: 16,
@@ -3892,26 +4158,34 @@ coinBalanceTopRight: {
   zIndex: 100, // ← Much higher to ensure it's on top
   flexShrink: 0, // ← Prevent shrinking
 },
-videoDeletionBanner: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  backgroundColor: '#FFF3E0',
-  borderWidth: 1,
-  borderColor: '#FFB74D',
-  borderRadius: 12,
-  padding: 12,
-  marginHorizontal: 16,
-  marginTop: 12,
-  marginBottom: 8,
-  gap: 10,
-},
-videoDeletionText: {
-  flex: 1,
-  fontSize: 13,
-  color: '#E65100',
-  lineHeight: 18,
-  fontWeight: '500',
-},
+videoDeletionToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 4,
+    alignSelf: 'flex-start',
+  },
+  videoDeletionToggleText: {
+    fontSize: 11,
+    color: '#fcfbf9',
+    fontWeight: '500',
+  },
+  videoDeletionBanner: {
+    backgroundColor: '#FFF3E0',
+    borderWidth: 1,
+    borderColor: '#FFB74D',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginHorizontal: 16,
+    marginBottom: 4,
+  },
+  videoDeletionText: {
+    fontSize: 11,
+    color: '#E65100',
+    lineHeight: 16,
+  },
 loadingMoreVideos: {
   paddingVertical: 20,
   alignItems: 'center',

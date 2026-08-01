@@ -22,8 +22,9 @@ import { IconSymbol } from '@/components/IconSymbol';
 import * as MediaLibrary from 'expo-media-library';
 import { File, Directory, Paths } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
-import { getVideoDownloadUrl } from '@/utils/bunnynet';
+import { getVideoDownloadUrl, getDownloadUrlViaEdgeFunction } from '@/utils/bunnynet';
 import { requestMediaLibrarySavePermission } from '@/utils/permissions';
+import { USE_EDGE_DOWNLOAD } from '@/config/uploadFlags';
 // 🪙 PHASE 7 IMPORT
 import { awardWinnerCoins } from '@/utils/request-coins';
 
@@ -207,12 +208,12 @@ const getCurrentUser = async () => {
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('Cutoff date:', timeFilter);
     } else {
-      // PUBLIC: Show videos up to 1 hour old
-      const oneHourAgo = new Date();
-      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
-      timeFilter = oneHourAgo.toISOString();
+      // PUBLIC: Show videos up to 24 hours old
+      const twentyFourHoursAgo = new Date();
+      twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
+      timeFilter = twentyFourHoursAgo.toISOString();
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('🌍 PUBLIC VIEW: Showing videos up to 1 hour old');
+      console.log('🌍 PUBLIC VIEW: Showing videos up to 24 hours old');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('Cutoff date:', timeFilter);
     }
@@ -237,9 +238,9 @@ const getCurrentUser = async () => {
       // Requester: Show all videos (no time filter)
       console.log('👤 REQUESTER: No time filter - showing all videos');
     } else {
-      // Public: Only show videos within 1 hour
+      // Public: Only show videos within 24 hours
       query = query.gte('created_at', timeFilter);
-      console.log('🌍 PUBLIC: Applying 1-hour filter');
+      console.log('🌍 PUBLIC: Applying 24-hour filter');
     }
 
     const { data: videosData, error: videosError } = await query;
@@ -682,7 +683,10 @@ Alert.alert(
   }
   
   console.log('📚 Using library ID:', libraryId);
-  downloadUrl = await getVideoDownloadUrl(videoUrl, libraryId);
+  const isPremium = libraryId === 597832;
+  downloadUrl = USE_EDGE_DOWNLOAD
+    ? await getDownloadUrlViaEdgeFunction(videoUrl, isPremium)
+    : await getVideoDownloadUrl(videoUrl, libraryId);
   console.log('✅ Download URL obtained:', downloadUrl);
 } catch (downloadError: any) {
         console.error('❌ Failed to get download URL:', downloadError.message);
@@ -895,7 +899,7 @@ Alert.alert(
           <Text style={styles.emptySubtext}>
             {isRequester 
               ? 'No videos have been posted to fulfill this request yet, or they have expired (3 days).'
-              : 'No videos have been posted to fulfill this request yet, or they have expired (1 hour).'}
+              : 'No videos have been posted to fulfill this request yet, or they have expired (24 hours).'}
           </Text>
           <Text style={styles.emptySubtext}>Swipe right to go back</Text>
         </View>
@@ -1035,7 +1039,7 @@ const styles = StyleSheet.create({
   // 🪙 PHASE 7: Container for both buttons (horizontal layout)
   requesterActionsContainer: {
     position: 'absolute',
-    bottom: 120,
+    bottom: 150,
     right: 20,
     flexDirection: 'row', // HORIZONTAL layout
     gap: 12,

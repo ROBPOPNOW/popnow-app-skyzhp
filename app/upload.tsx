@@ -20,13 +20,17 @@ import { colors } from '@/styles/commonStyles';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as Location from 'expo-location';
 import { checkUploadLimit } from '@/services/premiumLimitsService';
-import { 
-  createStreamVideo, 
-  uploadToStream, 
-  getVideoStatus, 
+import {
+  createStreamVideo,
+  uploadToStream,
+  uploadVideoViaTus,
+  getVideoStatus,
+  getVideoStatusViaEdgeFunction,
   deleteStreamVideo,
+  getDeleteVideoViaEdgeFunction,
 } from '@/utils/bunnynet';
 import Constants from 'expo-constants';
+import { USE_TUS_UPLOAD, USE_EDGE_STATUS_CHECK, USE_EDGE_DELETE } from '@/config/uploadFlags';
 
 type LocationPrivacy = 'exact' | '3km' | '10km';
 
@@ -469,34 +473,38 @@ const proceedWithUpload = async () => {
     console.log('✅ Upload limit OK, proceeding...');
 
     // 🚨 CRITICAL: Validate environment variables BEFORE attempting upload
-    console.log('🔍 Validating Bunny.net credentials...');
-    const bunnyApiKey = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_API_KEY;
-    
-    if (!bunnyApiKey) {
-      console.error('❌ EXPO_PUBLIC_BUNNY_STREAM_API_KEY is not set');
-      Alert.alert(
-        'Configuration Error',
-        'Bunny.net API key is missing.\n\nPlease check your .env file and ensure EXPO_PUBLIC_BUNNY_STREAM_API_KEY is set correctly.',
-        [{ text: 'OK' }]
-      );
-      setIsUploading(false);
-      return;
-    }
+    // Only needed for the legacy direct-key path — the TUS path (utils/bunnynet.ts →
+    // uploadVideoViaTus) is key-free and doesn't read EXPO_PUBLIC_BUNNY_STREAM_API_KEY at all.
+    if (!USE_TUS_UPLOAD) {
+      console.log('🔍 Validating Bunny.net credentials...');
+      const bunnyApiKey = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_API_KEY;
 
-    if (bunnyApiKey.length < 20) {
-      console.error('❌ EXPO_PUBLIC_BUNNY_STREAM_API_KEY appears invalid (too short)');
-      Alert.alert(
-        'Configuration Error',
-        'Bunny.net API key appears invalid.\n\nPlease verify EXPO_PUBLIC_BUNNY_STREAM_API_KEY in your .env file.',
-        [{ text: 'OK' }]
-      );
-      setIsUploading(false);
-      return;
-    }
+      if (!bunnyApiKey) {
+        console.error('❌ EXPO_PUBLIC_BUNNY_STREAM_API_KEY is not set');
+        Alert.alert(
+          'Configuration Error',
+          'Bunny.net API key is missing.\n\nPlease check your .env file and ensure EXPO_PUBLIC_BUNNY_STREAM_API_KEY is set correctly.',
+          [{ text: 'OK' }]
+        );
+        setIsUploading(false);
+        return;
+      }
 
-    console.log('✅ Credentials validated');
-    console.log('  - Library ID: 517995 (hardcoded)');
-    console.log('  - API Key: Present (length:', bunnyApiKey.length, ')');
+      if (bunnyApiKey.length < 20) {
+        console.error('❌ EXPO_PUBLIC_BUNNY_STREAM_API_KEY appears invalid (too short)');
+        Alert.alert(
+          'Configuration Error',
+          'Bunny.net API key appears invalid.\n\nPlease verify EXPO_PUBLIC_BUNNY_STREAM_API_KEY in your .env file.',
+          [{ text: 'OK' }]
+        );
+        setIsUploading(false);
+        return;
+      }
+
+      console.log('✅ Credentials validated');
+      console.log('  - Library ID: 517995 (hardcoded)');
+      console.log('  - API Key: Present (length:', bunnyApiKey.length, ')');
+    }
 
     console.log('🚀 Starting upload process');
     console.log('  - User ID:', user.id);
@@ -614,51 +622,88 @@ const proceedWithUpload = async () => {
       const isPremium = userData?.is_premium || false;
       console.log('👑 User premium status:', isPremium);
 
-      try {
-        const videoData = await createStreamVideo(caption, isPremium);
-        bunnyVideoId = videoData.guid;
-        console.log('✅ Video created with ID:', bunnyVideoId);
-        console.log('  Watermark:', isPremium ? 'DISABLED (Premium)' : 'ENABLED (Free)');
+      if (USE_TUS_UPLOAD) {
+        // ── NEW: key-free TUS path (utils/bunnynet.ts → uploadVideoViaTus) ──
+        try {
+          await uploadVideoViaTus(caption, videoUri, {
+            isPremium,
+            onVideoCreated: async (created) => {
+              bunnyVideoId = created.guid;
+              console.log('✅ Video created with ID:', bunnyVideoId);
+              console.log('  Watermark:', isPremium ? 'DISABLED (Premium)' : 'ENABLED (Free)');
 
-        // 🚨 CRITICAL: Store Bunny video ID in pending_uploads so cancel can find it
-        console.log('💾 Storing Bunny video ID in pending upload record...');
-        console.log('   Pending Upload ID:', pendingUploadId);
-        console.log('   Bunny Video ID:', bunnyVideoId);
+              // 🚨 CRITICAL: Store Bunny video ID in pending_uploads so cancel can find it
+              console.log('💾 Storing Bunny video ID in pending upload record...');
+              const { error: updateError } = await supabase
+                .from('pending_uploads')
+                .update({ bunny_video_id: bunnyVideoId, upload_progress: 20 })
+                .eq('id', pendingUploadId);
 
-        const { data: updateResult, error: updateError } = await supabase
-          .from('pending_uploads')
-          .update({ bunny_video_id: bunnyVideoId })
-          .eq('id', pendingUploadId)
-          .select();
-
-        if (updateError) {
-          console.error('❌ Error storing Bunny video ID:', updateError);
-        } else {
-          console.log('✅ Bunny video ID stored successfully');
-          console.log('   Updated record:', updateResult);
+              if (updateError) {
+                console.error('❌ Error storing Bunny video ID:', updateError);
+              } else {
+                console.log('✅ Bunny video ID stored successfully');
+              }
+            },
+            onProgress: async (uploaded, total) => {
+              // maps the byte-upload phase onto the existing 20%→60% band
+              const pct = 20 + Math.round((uploaded / total) * 40);
+              await supabase.from('pending_uploads').update({ upload_progress: pct }).eq('id', pendingUploadId);
+            },
+          });
+          console.log('✅ Video uploaded successfully via TUS');
+        } catch (error: any) {
+          console.error('❌ TUS upload failed:', error.message);
+          throw new Error(`Failed to upload video: ${error.message}`);
         }
-      } catch (createError: any) {
-        console.error('❌ Failed to create video on Bunny.net:', createError.message);
-        throw new Error(`Failed to create video: ${createError.message}`);
-      }
+      } else {
+        // ── OLD: direct-key path (fallback, unchanged) ──
+        try {
+          const videoData = await createStreamVideo(caption, isPremium);
+          bunnyVideoId = videoData.guid;
+          console.log('✅ Video created with ID:', bunnyVideoId);
+          console.log('  Watermark:', isPremium ? 'DISABLED (Premium)' : 'ENABLED (Free)');
 
-      // Update progress: 20% - Uploading video file
-      console.log('📊 Progress: 20% - Uploading video file');
-      await supabase
-        .from('pending_uploads')
-        .update({ upload_progress: 20 })
-        .eq('id', pendingUploadId);
+          // 🚨 CRITICAL: Store Bunny video ID in pending_uploads so cancel can find it
+          console.log('💾 Storing Bunny video ID in pending upload record...');
+          console.log('   Pending Upload ID:', pendingUploadId);
+          console.log('   Bunny Video ID:', bunnyVideoId);
 
-      // 🚨 CRITICAL: Upload video file
-      console.log('📤 Uploading video file to Bunny.net...');
-      try {
-        await uploadToStream(bunnyVideoId, videoUri, isPremium);
-        
-        console.log('✅ Video uploaded successfully');
-      } catch (uploadError: any) {
-        console.error('❌ Failed to upload video file:', uploadError.message);
-        
-        throw new Error(`Failed to upload video: ${uploadError.message}`);
+          const { data: updateResult, error: updateError } = await supabase
+            .from('pending_uploads')
+            .update({ bunny_video_id: bunnyVideoId })
+            .eq('id', pendingUploadId)
+            .select();
+
+          if (updateError) {
+            console.error('❌ Error storing Bunny video ID:', updateError);
+          } else {
+            console.log('✅ Bunny video ID stored successfully');
+            console.log('   Updated record:', updateResult);
+          }
+        } catch (createError: any) {
+          console.error('❌ Failed to create video on Bunny.net:', createError.message);
+          throw new Error(`Failed to create video: ${createError.message}`);
+        }
+
+        // Update progress: 20% - Uploading video file
+        console.log('📊 Progress: 20% - Uploading video file');
+        await supabase
+          .from('pending_uploads')
+          .update({ upload_progress: 20 })
+          .eq('id', pendingUploadId);
+
+        // 🚨 CRITICAL: Upload video file
+        console.log('📤 Uploading video file to Bunny.net...');
+        try {
+          await uploadToStream(bunnyVideoId, videoUri, isPremium);
+
+          console.log('✅ Video uploaded successfully');
+        } catch (uploadError: any) {
+          console.error('❌ Failed to upload video file:', uploadError.message);
+
+          throw new Error(`Failed to upload video: ${uploadError.message}`);
+        }
       }
 
       // Update progress: 60% - Processing video
@@ -676,8 +721,10 @@ const proceedWithUpload = async () => {
 
       while (!processed && attempts < maxAttempts) {
         await new Promise(resolve => setTimeout(resolve, 2000));
-        const status = await getVideoStatus(bunnyVideoId, isPremium);
-        
+        const status = USE_EDGE_STATUS_CHECK
+          ? await getVideoStatusViaEdgeFunction(bunnyVideoId, isPremium)
+          : await getVideoStatus(bunnyVideoId, isPremium);
+
         const processingProgress = 60 + Math.min(attempts * 1, 30);
         await supabase
           .from('pending_uploads')
@@ -865,7 +912,11 @@ if (reqId) {
     if (bunnyVideoId) {
       console.log('🗑️ Deleting video from Bunny.net...');
       try {
-        await deleteStreamVideo(bunnyVideoId, isPremium);
+        if (USE_EDGE_DELETE) {
+          await getDeleteVideoViaEdgeFunction(bunnyVideoId, isPremium);
+        } else {
+          await deleteStreamVideo(bunnyVideoId, isPremium);
+        }
         console.log('✅ Video deleted from Bunny.net');
         cleanupResults.bunny = true;
       } catch (deleteError: any) {
@@ -897,34 +948,31 @@ if (reqId) {
       console.log('ℹ️ No video record ID, skipping database deletion');
     }
     
-    // Always try to delete pending upload record
-    if (pendingUploadId) {
-      console.log('🗑️ Cleaning up pending upload record...');
-      try {
-        const { error: deleteError } = await supabase
-          .from('pending_uploads')
-          .delete()
-          .eq('id', pendingUploadId);
-        
-        if (deleteError) {
-          console.error('⚠️ Pending upload delete error:', deleteError);
-        } else {
-          console.log('✅ Pending upload record deleted');
-          cleanupResults.pending = true;
-        }
-      } catch (deleteError: any) {
-        console.error('⚠️ Error deleting pending upload:', deleteError.message);
-      }
+// Mark as failed instead of deleting — allows retry
+if (pendingUploadId) {
+  console.log('🔴 Marking pending upload as failed...');
+  try {
+    const { error: updateError } = await supabase
+      .from('pending_uploads')
+      .update({ 
+        status: 'failed',
+        upload_progress: 0,
+        error_message: 'Upload failed. Tap retry to try again.',
+      })
+      .eq('id', pendingUploadId);
+
+    if (updateError) {
+      console.error('⚠️ Failed to mark as failed:', updateError);
+    } else {
+      console.log('✅ Pending upload marked as failed');
+      cleanupResults.pending = true;
     }
-    
-    console.log('🧹 Cleanup Results:');
-    console.log('  - Bunny.net:', cleanupResults.bunny ? '✅' : '❌');
-    console.log('  - Database:', cleanupResults.database ? '✅' : '❌');
-    console.log('  - Pending:', cleanupResults.pending ? '✅' : '❌');
-    console.log('✅ Cleanup complete');
-    
-    return cleanupResults;
-  }, []);
+  } catch (deleteError: any) {
+    console.error('⚠️ Error updating pending upload:', deleteError);
+  }
+}
+
+}, []); // ← This closes cleanupFailedUpload
 
   // 📍 LOCATION DENIED SCREEN
   if (locationDenied) {
@@ -1014,7 +1062,7 @@ if (reqId) {
           style={styles.content}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ paddingBottom: 100 }}
+          contentContainerStyle={{ paddingBottom: 160 }}
         >
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Video Ready</Text>
