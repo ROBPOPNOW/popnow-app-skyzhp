@@ -493,10 +493,32 @@ const handleRetryUpload = async (upload: any) => {
       return;
     }
 
+    const { data: userData } = await supabase
+      .from('users')
+      .select('is_premium')
+      .eq('id', user.id)
+      .single();
+
+    const isPremium = userData?.is_premium || false;
+
     // Check if the original video file still exists
     const fileInfo = await FileSystem.getInfoAsync(upload.video_uri);
-    
+
     if (!fileInfo.exists) {
+      // Delete the orphaned Bunny video from the failed attempt before dropping the row
+      if (upload.bunny_video_id) {
+        try {
+          if (USE_EDGE_DELETE) {
+            await getDeleteVideoViaEdgeFunction(upload.bunny_video_id, isPremium);
+          } else {
+            await deleteStreamVideo(upload.bunny_video_id, isPremium);
+          }
+          console.log('✅ Orphaned Bunny video deleted:', upload.bunny_video_id);
+        } catch (deleteError) {
+          console.error('⚠️ Failed to delete orphaned Bunny video:', deleteError);
+        }
+      }
+
       Alert.alert(
         'Video File Not Found',
         'The original video file is no longer available. Please record a new video.',
@@ -508,14 +530,30 @@ const handleRetryUpload = async (upload: any) => {
       return;
     }
 
+    // Delete the previous (interrupted) Bunny video before starting a fresh upload,
+    // so retrying doesn't orphan the old half-uploaded video on Bunny.net
+    if (upload.bunny_video_id) {
+      try {
+        if (USE_EDGE_DELETE) {
+          await getDeleteVideoViaEdgeFunction(upload.bunny_video_id, isPremium);
+        } else {
+          await deleteStreamVideo(upload.bunny_video_id, isPremium);
+        }
+        console.log('✅ Previous Bunny video deleted before retry:', upload.bunny_video_id);
+      } catch (deleteError) {
+        console.error('⚠️ Failed to delete previous Bunny video before retry:', deleteError);
+      }
+    }
+
     // Reset to uploading status
     await supabase
       .from('pending_uploads')
-      .update({ 
+      .update({
         status: 'uploading',
         upload_progress: 10,
         error_message: null,
         bunny_video_id: null,
+        updated_at: new Date().toISOString(),
       })
       .eq('id', upload.id);
 
@@ -523,13 +561,6 @@ const handleRetryUpload = async (upload: any) => {
 
     // Dynamically import bunnynet utils and restart upload
     const bunnynet = await import('@/utils/bunnynet');
-    const { data: userData } = await supabase
-      .from('users')
-      .select('is_premium')
-      .eq('id', user.id)
-      .single();
-
-    const isPremium = userData?.is_premium || false;
 
     let bunnyVideoId: string | null = null;
 
@@ -547,7 +578,7 @@ const handleRetryUpload = async (upload: any) => {
           ));
           await supabase
             .from('pending_uploads')
-            .update({ bunny_video_id: bunnyVideoId, upload_progress: 20 })
+            .update({ bunny_video_id: bunnyVideoId, upload_progress: 20, updated_at: new Date().toISOString() })
             .eq('id', upload.id);
         },
         onProgress: async (uploaded, total) => {
@@ -557,7 +588,7 @@ const handleRetryUpload = async (upload: any) => {
               ? { ...p, upload_progress: pct }
               : p
           ));
-          await supabase.from('pending_uploads').update({ upload_progress: pct }).eq('id', upload.id);
+          await supabase.from('pending_uploads').update({ upload_progress: pct, updated_at: new Date().toISOString() }).eq('id', upload.id);
         },
       });
     } else {
@@ -568,7 +599,7 @@ const handleRetryUpload = async (upload: any) => {
 
       await supabase
         .from('pending_uploads')
-        .update({ bunny_video_id: bunnyVideoId, upload_progress: 20 })
+        .update({ bunny_video_id: bunnyVideoId, upload_progress: 20, updated_at: new Date().toISOString() })
         .eq('id', upload.id);
 
       // Step 2: Upload file
@@ -577,7 +608,7 @@ const handleRetryUpload = async (upload: any) => {
 
     await supabase
       .from('pending_uploads')
-      .update({ upload_progress: 60, status: 'processing' })
+      .update({ upload_progress: 60, status: 'processing', updated_at: new Date().toISOString() })
       .eq('id', upload.id);
 
     // Step 3: Wait for processing
@@ -602,7 +633,7 @@ const handleRetryUpload = async (upload: any) => {
       ));
       await supabase
         .from('pending_uploads')
-        .update({ upload_progress: processingPct })
+        .update({ upload_progress: processingPct, updated_at: new Date().toISOString() })
         .eq('id', upload.id);
     }
 
@@ -611,7 +642,7 @@ const handleRetryUpload = async (upload: any) => {
     // Step 4: Save to database
     await supabase
       .from('pending_uploads')
-      .update({ upload_progress: 95 })
+      .update({ upload_progress: 95, updated_at: new Date().toISOString() })
       .eq('id', upload.id);
 
     const libraryId = isPremium ? 597832 : 517995;
@@ -674,6 +705,60 @@ const handleRetryUpload = async (upload: any) => {
     loadPendingUploads();
     Alert.alert('Retry Failed', 'Upload failed again. Please try again later.');
   }
+};
+
+const handleDismissFailedUpload = (upload: any) => {
+  Alert.alert(
+    'Delete Upload',
+    'This will permanently delete this failed upload. This action cannot be undone.',
+    [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          console.log('🗑️ Dismissing failed upload:', upload.id);
+
+          // Optimistically remove from UI immediately
+          setPendingUploads(prev => prev.filter(p => p.id !== upload.id));
+
+          try {
+            if (upload.bunny_video_id) {
+              const { data: { user } } = await supabase.auth.getUser();
+              let isPremium = false;
+              if (user) {
+                const { data: userData } = await supabase
+                  .from('users')
+                  .select('is_premium')
+                  .eq('id', user.id)
+                  .single();
+                isPremium = userData?.is_premium || false;
+              }
+
+              try {
+                if (USE_EDGE_DELETE) {
+                  await getDeleteVideoViaEdgeFunction(upload.bunny_video_id, isPremium);
+                } else {
+                  await deleteStreamVideo(upload.bunny_video_id, isPremium);
+                }
+                console.log("✅ Dismissed upload's Bunny video deleted:", upload.bunny_video_id);
+              } catch (deleteError) {
+                console.error('⚠️ Failed to delete Bunny video for dismissed upload:', deleteError);
+              }
+            }
+
+            const { error } = await supabase.from('pending_uploads').delete().eq('id', upload.id);
+            if (error) {
+              console.error('❌ Failed to delete pending upload row:', error);
+            }
+          } catch (error) {
+            console.error('❌ Error dismissing failed upload:', error);
+            loadPendingUploads();
+          }
+        },
+      },
+    ]
+  );
 };
 
 // 🪙 CHECK AND AWARD DAILY BONUS
@@ -2856,17 +2941,30 @@ const isFailed = upload.status === 'failed';
     <Text style={styles.statusText}>{uploadStatusText}</Text>
   </View>
   {isFailed && (
-    <Pressable
-      onPress={() => handleRetryUpload(upload)}
-      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-    >
-      <IconSymbol
-        ios_icon_name="arrow.clockwise.circle.fill"
-        android_material_icon_name="refresh"
-        size={24}
-        color="#F44336"
-      />
-    </Pressable>
+    <>
+      <Pressable
+        onPress={() => handleRetryUpload(upload)}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <IconSymbol
+          ios_icon_name="arrow.clockwise.circle.fill"
+          android_material_icon_name="refresh"
+          size={24}
+          color="#F44336"
+        />
+      </Pressable>
+      <Pressable
+        onPress={() => handleDismissFailedUpload(upload)}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <IconSymbol
+          ios_icon_name="trash.fill"
+          android_material_icon_name="delete"
+          size={22}
+          color="#F44336"
+        />
+      </Pressable>
+    </>
   )}
 </View>
       </View>

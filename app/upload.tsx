@@ -606,7 +606,7 @@ const proceedWithUpload = async () => {
       console.log('📊 Progress: 10% - Creating video on Bunny.net');
       await supabase
         .from('pending_uploads')
-        .update({ upload_progress: 10 })
+        .update({ upload_progress: 10, updated_at: new Date().toISOString() })
         .eq('id', pendingUploadId);
 
       // 🚨 CRITICAL: Create video on Bunny.net Stream
@@ -636,7 +636,7 @@ const proceedWithUpload = async () => {
               console.log('💾 Storing Bunny video ID in pending upload record...');
               const { error: updateError } = await supabase
                 .from('pending_uploads')
-                .update({ bunny_video_id: bunnyVideoId, upload_progress: 20 })
+                .update({ bunny_video_id: bunnyVideoId, upload_progress: 20, updated_at: new Date().toISOString() })
                 .eq('id', pendingUploadId);
 
               if (updateError) {
@@ -648,7 +648,7 @@ const proceedWithUpload = async () => {
             onProgress: async (uploaded, total) => {
               // maps the byte-upload phase onto the existing 20%→60% band
               const pct = 20 + Math.round((uploaded / total) * 40);
-              await supabase.from('pending_uploads').update({ upload_progress: pct }).eq('id', pendingUploadId);
+              await supabase.from('pending_uploads').update({ upload_progress: pct, updated_at: new Date().toISOString() }).eq('id', pendingUploadId);
             },
           });
           console.log('✅ Video uploaded successfully via TUS');
@@ -671,7 +671,7 @@ const proceedWithUpload = async () => {
 
           const { data: updateResult, error: updateError } = await supabase
             .from('pending_uploads')
-            .update({ bunny_video_id: bunnyVideoId })
+            .update({ bunny_video_id: bunnyVideoId, updated_at: new Date().toISOString() })
             .eq('id', pendingUploadId)
             .select();
 
@@ -690,7 +690,7 @@ const proceedWithUpload = async () => {
         console.log('📊 Progress: 20% - Uploading video file');
         await supabase
           .from('pending_uploads')
-          .update({ upload_progress: 20 })
+          .update({ upload_progress: 20, updated_at: new Date().toISOString() })
           .eq('id', pendingUploadId);
 
         // 🚨 CRITICAL: Upload video file
@@ -710,7 +710,7 @@ const proceedWithUpload = async () => {
       console.log('📊 Progress: 60% - Processing video');
       await supabase
         .from('pending_uploads')
-        .update({ upload_progress: 60, status: 'processing' })
+        .update({ upload_progress: 60, status: 'processing', updated_at: new Date().toISOString() })
         .eq('id', pendingUploadId);
 
       // Wait for video processing
@@ -728,7 +728,7 @@ const proceedWithUpload = async () => {
         const processingProgress = 60 + Math.min(attempts * 1, 30);
         await supabase
           .from('pending_uploads')
-          .update({ upload_progress: processingProgress })
+          .update({ upload_progress: processingProgress, updated_at: new Date().toISOString() })
           .eq('id', pendingUploadId);
         
         console.log(`⏳ Attempt ${attempts + 1}/${maxAttempts} - Bunny status: ${status.status}`);
@@ -750,7 +750,7 @@ const proceedWithUpload = async () => {
       console.log('📊 Progress: 95% - Saving to database');
       await supabase
         .from('pending_uploads')
-        .update({ upload_progress: 95 })
+        .update({ upload_progress: 95, updated_at: new Date().toISOString() })
         .eq('id', pendingUploadId);
 
       const videoUrl = bunnyVideoId;
@@ -837,9 +837,10 @@ if (reqId) {
       console.log('📊 Progress: 100% - Upload complete');
       await supabase
         .from('pending_uploads')
-        .update({ 
-          upload_progress: 100, 
-          status: 'completed'
+        .update({
+          upload_progress: 100,
+          status: 'completed',
+          updated_at: new Date().toISOString()
         })
         .eq('id', pendingUploadId);
 
