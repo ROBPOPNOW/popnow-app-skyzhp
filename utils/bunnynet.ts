@@ -4,9 +4,6 @@ import Constants from 'expo-constants';
 import { supabase } from '@/lib/supabase';
 
 // Bunny.net Configuration - Read from app.json extra config
-const BUNNY_STORAGE_ZONE_NAME = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STORAGE_ZONE_NAME || '';
-const BUNNY_STORAGE_API_KEY = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STORAGE_API_KEY || '';
-const BUNNY_CDN_HOSTNAME = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_CDN_HOSTNAME || '';
 const BUNNY_STREAM_LIBRARY_ID = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_LIBRARY_ID || '';
 const BUNNY_STREAM_API_KEY = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_API_KEY || '';
 const BUNNY_STREAM_CDN_HOSTNAME = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_CDN_HOSTNAME || '';
@@ -14,15 +11,10 @@ const BUNNY_STREAM_CDN_HOSTNAME = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY
 // Optional: Token authentication key (if enabled in Bunny.net Stream)
 const BUNNY_STREAM_TOKEN_AUTH_KEY = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_TOKEN_AUTH_KEY || '';
 
-// Storage API Base URL
-const STORAGE_API_BASE = 'https://storage.bunnycdn.com';
 const STREAM_API_BASE = 'https://video.bunnycdn.com/library';
 
 // Log configuration on module load (without exposing sensitive keys)
 console.log('Bunny.net Configuration:', {
-  hasStorageZone: !!BUNNY_STORAGE_ZONE_NAME,
-  hasStorageKey: !!BUNNY_STORAGE_API_KEY,
-  hasCDNHostname: !!BUNNY_CDN_HOSTNAME,
   hasStreamLibraryId: !!BUNNY_STREAM_LIBRARY_ID,
   hasStreamKey: !!BUNNY_STREAM_API_KEY,
   hasStreamCDN: !!BUNNY_STREAM_CDN_HOSTNAME,
@@ -210,7 +202,7 @@ export async function uploadToStream(
 // TUS resumable upload (key-free) — replaces createStreamVideo()+uploadToStream()
 // as a single call. Uploads directly to Bunny using a short-lived signed token from
 // the `bunny-create-video` Edge Function; no Bunny AccessKey ever touches the client.
-// Ported 1:1 from the verified app/tus-spike.tsx spike. Left createStreamVideo()/
+// Ported 1:1 from the verified TUS spike. Left createStreamVideo()/
 // uploadToStream() above untouched as a fallback until this is wired in and confirmed.
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -244,7 +236,7 @@ export interface TusUploadOptions {
  * short-lived signed token from the `bunny-create-video` Supabase Edge Function.
  * No Bunny AccessKey is ever present on the client.
  *
- * Ported 1:1 from the verified app/tus-spike.tsx spike — same 4 steps, same PATCH
+ * Ported 1:1 from the verified TUS spike — same 4 steps, same PATCH
  * headers, same File/FileHandle chunked-read approach, same correctness checks.
  */
 export async function uploadVideoViaTus(

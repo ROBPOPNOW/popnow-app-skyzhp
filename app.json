@@ -10,8 +10,6 @@
         "projectId": "cbb91220-eec0-4c5c-b599-d60da21ca5b2"
       },
       "EXPO_PUBLIC_SUPABASE_URL": "https://spdsgmkirubngfdxxrzj.supabase.co",
-      "EXPO_PUBLIC_BUNNY_STORAGE_ZONE_NAME": "popnow",
-      "EXPO_PUBLIC_BUNNY_CDN_HOSTNAME": "vz-60af4a59-0b4.b-cdn.net",
       "EXPO_PUBLIC_BUNNY_STREAM_LIBRARY_ID": "517995",
       "EXPO_PUBLIC_BUNNY_STREAM_CDN_HOSTNAME": "vz-60af4a59-0b4.b-cdn.net",
       "EXPO_PUBLIC_BUNNY_PREMIUM_LIBRARY_ID": "597832",

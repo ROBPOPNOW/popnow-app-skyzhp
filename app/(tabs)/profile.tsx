@@ -236,56 +236,6 @@ useEffect(() => {
   };
 }, [activeTab]);
 
-  // Clean up pending uploads when videos are approved or rejected
-useEffect(() => {
-  if (activeTab !== 'pending' && activeTab !== 'videos') return;
-  let mounted = true;
-
-  const cleanupPendingUploads = async () => {
-    if (!mounted) return;
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user || !mounted) return;
-
-      const { data: pendingUploads } = await supabase
-        .from('pending_uploads')
-        .select('id, caption')
-        .eq('user_id', user.id)
-        .eq('status', 'moderating');
-
-      if (!pendingUploads || pendingUploads.length === 0) return;
-
-      for (const pending of pendingUploads) {
-        if (!mounted) return;
-        const { data: video } = await supabase
-          .from('videos')
-          .select('id, moderation_status, caption')
-          .eq('user_id', user.id)
-          .eq('caption', pending.caption)
-          .single();
-
-        if (video) {
-          if (video.moderation_status === 'approved' || video.moderation_status === 'rejected') {
-            await supabase
-              .from('pending_uploads')
-              .delete()
-              .eq('id', pending.id);
-            console.log('🧹 Cleaned up pending upload:', pending.id);
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Error cleaning up pending uploads:', error);
-    }
-  };
-
-  const interval = setInterval(cleanupPendingUploads, 5000);
-  return () => {
-    mounted = false;
-    clearInterval(interval);
-  };
-}, [activeTab]);
-
 // 🎬 Trigger animation when coins change
 useEffect(() => {
   if (!mountedRef.current) return;
@@ -417,7 +367,7 @@ const loadPendingUploads = async () => {
       .from('pending_uploads')
       .select('*')
       .eq('user_id', user.id)
-      .in('status', ['uploading', 'processing', 'moderating', 'failed'])
+      .in('status', ['uploading', 'processing', 'failed'])
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -459,7 +409,7 @@ const loadPendingUploadsInBackground = async () => {
       .from('pending_uploads')
       .select('*')
       .eq('user_id', user.id)
-      .in('status', ['uploading', 'processing', 'moderating', 'failed'])
+      .in('status', ['uploading', 'processing', 'failed'])
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -2909,8 +2859,6 @@ if (upload.status === 'uploading') {
   uploadStatusText = 'Uploading...';
 } else if (upload.status === 'processing') {
   uploadStatusText = 'Processing video...';
-} else if (upload.status === 'moderating') {
-  uploadStatusText = 'Checking content...';
 } else if (upload.status === 'failed') {
   uploadStatusText = 'Upload Failed';
 }
@@ -3226,11 +3174,6 @@ const tabs: TabBarItem[] = [
       <View style={{ flex: 1 }}>
           {/* Profile Header - Horizontal Layout */}
           <View style={styles.header}>
-
-            {/* TEMP DEBUG BUTTON — remove together with app/tus-spike.tsx when done */}
-            <Pressable onPress={() => router.push('/tus-spike')} style={{ position: 'absolute', top: 8, left: 8, zIndex: 999, backgroundColor: '#2563eb', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 }}>
-              <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>TUS Spike</Text>
-            </Pressable>
 
             {/* 🪙 COIN BALANCE - Top Right Corner */}
 <Pressable 
