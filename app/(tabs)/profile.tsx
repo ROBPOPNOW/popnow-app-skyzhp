@@ -395,9 +395,12 @@ const loadPendingUploads = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    // Auto-mark stale uploading records as failed
-    // Any record stuck at uploading/processing for > 2 minutes is considered failed
-    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    // Auto-mark stale uploading records as failed.
+    // 90s, not lower: bounded by the slowest legitimate single TUS chunk (5MB) upload
+    // time on a poor connection — going shorter risks a false flip while the upload is
+    // still genuinely in progress, which is now destructive (retry/dismiss delete the
+    // Bunny video the real upload may still be streaming into).
+    const staleThreshold = new Date(Date.now() - 90 * 1000).toISOString();
     await supabase
       .from('pending_uploads')
       .update({
@@ -407,7 +410,7 @@ const loadPendingUploads = async () => {
       })
       .eq('user_id', user.id)
       .in('status', ['uploading', 'processing'])
-      .lt('updated_at', twoMinutesAgo);
+      .lt('updated_at', staleThreshold);
 
     // Get pending uploads from pending_uploads table
     const { data, error } = await supabase
@@ -438,8 +441,8 @@ const loadPendingUploadsInBackground = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    // Auto-mark stale uploading records as failed
-    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    // Auto-mark stale uploading records as failed (see loadPendingUploads for why 90s)
+    const staleThreshold = new Date(Date.now() - 90 * 1000).toISOString();
     await supabase
       .from('pending_uploads')
       .update({
@@ -449,7 +452,7 @@ const loadPendingUploadsInBackground = async () => {
       })
       .eq('user_id', user.id)
       .in('status', ['uploading', 'processing'])
-      .lt('updated_at', twoMinutesAgo);
+      .lt('updated_at', staleThreshold);
 
     // Fetch without showing loading state
     const { data, error } = await supabase
