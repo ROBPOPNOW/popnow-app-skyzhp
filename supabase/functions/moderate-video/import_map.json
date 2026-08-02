@@ -1,7 +1,0 @@
-
-{
-  "imports": {
-    "@trigger.dev/sdk/v3": "https://esm.sh/@trigger.dev/sdk@latest/v3",
-    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2"
-  }
-}

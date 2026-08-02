@@ -85,57 +85,6 @@ SELECT cron.schedule(
 
 ### Auto-Delete AI Moderation Rejected Content
 
-#### Video Moderation with Immediate Deletion
-**File**: `trigger/moderate-pop-video.ts`
-
-**Process Flow**:
-1. **Download Video**: Fetch video from Bunny.net
-2. **Extract Frames**: Extract 7 frames at 5-second intervals (0s, 5s, 10s, 15s, 20s, 25s, 30s)
-3. **AI Moderation**: Send all frames to AWS Rekognition in parallel
-4. **If ANY Frame is Flagged** (Confidence > 80%):
-   - **Create Notification**: Send rejection notification to user
-   - **Delete from Bunny.net**: DELETE video using API
-   - **Delete from Database**: DELETE video record from Supabase
-   - **Result**: Video is completely gone, user sees notification only
-5. **If All Frames are Clean**:
-   - **Approve Video**: Set `is_approved = true` in database
-   - **Video Goes Live**: Video appears in feeds
-
-**Key Features**:
-- ✅ Immediate deletion upon rejection (no storage waste)
-- ✅ User notification sent before deletion
-- ✅ Complete cleanup from all storage locations
-- ✅ Detailed logging of rejection reasons
-- ✅ Parallel frame processing for speed
-
-**Example Log Output (Rejection)**:
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 FINAL VERDICT:
-  - Frames checked: 7
-  - Status: ❌ REJECTED
-  - Reasons: Explicit Nudity at 10s (95.23% confidence)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-💾 STEP 4: UPDATING DATABASE & HANDLING REJECTION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-❌ VIDEO REJECTED - INITIATING IMMEDIATE DELETION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📧 Creating rejection notification for user: user123
-✅ Rejection notification created
-🗑️ Step 1: Deleting video from Bunny.net...
-✅ Video deleted from Bunny.net successfully
-🗑️ Step 2: Thumbnail auto-deleted with video
-🗑️ Step 3: Deleting video record from database...
-✅ Video record deleted from database
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ REJECTED VIDEO COMPLETELY DELETED
-   - Bunny.net: Deleted
-   - Database: Deleted
-   - Notification: Sent to user
-   - Storage cost: SAVED ✅
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
 #### Avatar Moderation with Immediate Deletion
 **File**: `supabase/functions/moderate-avatar/index.ts`
 
@@ -238,27 +187,11 @@ CREATE TABLE notifications (
 - **Frequency**: Runs every hour at the start of the hour
 - **Metrics**: Tracks deleted count, failed count, and total processed
 
-### Moderation Monitoring
-- **Logs**: Check Trigger.dev logs for video moderation tasks
-- **Metrics**: Tracks approval rate, rejection rate, and deletion success
-- **Notifications**: Users receive notifications for all rejections
-
 ## 🚀 Deployment Checklist
 
 ### Environment Variables Required
 
 **Supabase Edge Functions**:
-```bash
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-BUNNY_STREAM_LIBRARY_ID=your-library-id
-BUNNY_STREAM_API_KEY=your-api-key
-AWS_ACCESS_KEY_ID=your-aws-access-key
-AWS_SECRET_ACCESS_KEY=your-aws-secret-key
-AWS_REGION=ap-southeast-2
-```
-
-**Trigger.dev**:
 ```bash
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
@@ -283,17 +216,12 @@ AWS_REGION=ap-southeast-2
    ```
    This will create the hourly cron job.
 
-3. **Deploy Trigger.dev Task**:
-   ```bash
-   npm run trigger:deploy
-   ```
-
-4. **Verify Cron Job**:
+3. **Verify Cron Job**:
    ```sql
    SELECT * FROM cron.job WHERE jobname = 'cleanup-expired-videos-hourly';
    ```
 
-5. **Test Cleanup Function**:
+4. **Test Cleanup Function**:
    ```bash
    curl -X POST https://your-project.supabase.co/functions/v1/cleanup-expired-videos \
      -H "Authorization: Bearer YOUR_SERVICE_ROLE_KEY" \
@@ -390,13 +318,11 @@ At scale (10,000 videos/day): **$33/month savings**
    ```
 
 ### Moderation Not Deleting Rejected Content
-1. Check Trigger.dev logs for moderation tasks
-2. Verify AWS Rekognition credentials
-3. Check Bunny.net API credentials
-4. Verify deletion function is being called
+1. Verify AWS Rekognition credentials
+2. Check Bunny.net API credentials
+3. Verify deletion function is being called
 
 ## 📚 Related Documentation
 - [AWS Rekognition Setup](./AWS_REKOGNITION_COMPLETE_SETUP.md)
 - [Bunny.net Integration](./BUNNY_NET_INTEGRATION.md)
-- [Trigger.dev Video Moderation](./TRIGGER_DEV_VIDEO_MODERATION.md)
 - [Video Lifecycle Management](./VIDEO_LIFECYCLE_IMPLEMENTATION.md)

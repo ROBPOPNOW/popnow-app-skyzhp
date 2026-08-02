@@ -41,34 +41,6 @@ SELECT public.trigger_video_cleanup_now();
 
 **Status**: ✅ **ACTIVE** and triggers on every moderation check
 
-#### Video Moderation (Trigger.dev Task)
-
-**Task**: `moderate-pop-video`
-- Location: `trigger/moderate-pop-video.ts`
-- Triggered when: New video is uploaded to Supabase
-- Process:
-  1. Downloads video from Bunny.net
-  2. Extracts 7 frames at 5-second intervals (0s, 5s, 10s, 15s, 20s, 25s, 30s)
-  3. Sends frames to AWS Rekognition for moderation (parallel processing)
-  4. If ANY frame is flagged with confidence > 80%:
-     - **Immediately deletes video from Bunny.net** using `EXPO_PUBLIC_BUNNY_STREAM_API_KEY`
-     - Deletes thumbnail (auto-deleted with video)
-     - Deletes video record from Supabase database
-     - Sends rejection notification to user
-     - Logs all deletion operations
-  5. If all frames are clean:
-     - Sets `is_approved = true` in database
-     - Video becomes visible to users
-
-**Environment Variables** (set in Trigger.dev dashboard):
-- `EXPO_PUBLIC_BUNNY_STREAM_LIBRARY_ID`
-- `EXPO_PUBLIC_BUNNY_STREAM_API_KEY`
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
-- `AWS_REGION`
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-
 #### Avatar Moderation (Edge Function)
 
 **Edge Function**: `moderate-avatar`
@@ -194,28 +166,7 @@ This will immediately run the cleanup function and show you any errors.
 
 ### Issue: AI-rejected videos are not being deleted
 
-**Check 1**: Are the Trigger.dev environment variables set?
-
-Go to Trigger.dev Dashboard → Your Project → Environment Variables
-
-Verify these variables exist:
-- `EXPO_PUBLIC_BUNNY_STREAM_LIBRARY_ID`
-- `EXPO_PUBLIC_BUNNY_STREAM_API_KEY`
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
-- `AWS_REGION`
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-
-**Check 2**: Check Trigger.dev logs
-
-Go to Trigger.dev Dashboard → Your Project → Runs
-
-Look for the `moderate-pop-video` task and check for errors like:
-- `❌ Bunny.net credentials not configured`
-- `❌ Failed to delete video from Bunny.net`
-
-**Check 3**: Check Supabase Edge Function logs for avatar moderation
+**Check 1**: Check Supabase Edge Function logs for avatar moderation
 
 Go to Supabase Dashboard → Edge Functions → `moderate-avatar` → Logs
 
@@ -243,18 +194,6 @@ All Edge Functions have access to these secrets:
 ✅ `AWS_ACCESS_KEY_ID`
 ✅ `AWS_SECRET_ACCESS_KEY`
 ✅ `AWS_REGION`
-✅ `TRIGGER_SECRET_KEY`
-
-### Trigger.dev Environment Variables
-Set in Trigger.dev Dashboard → Your Project → Environment Variables:
-
-✅ `EXPO_PUBLIC_BUNNY_STREAM_LIBRARY_ID`
-✅ `EXPO_PUBLIC_BUNNY_STREAM_API_KEY`
-✅ `AWS_ACCESS_KEY_ID`
-✅ `AWS_SECRET_ACCESS_KEY`
-✅ `AWS_REGION`
-✅ `SUPABASE_URL`
-✅ `SUPABASE_SERVICE_ROLE_KEY`
 
 ## 🎉 Success Criteria
 
@@ -266,8 +205,7 @@ The deletion system is working correctly when:
 4. ✅ AI-rejected videos are immediately deleted (not stored)
 5. ✅ AI-rejected avatars are immediately deleted (not stored)
 6. ✅ Edge Function logs show successful deletions
-7. ✅ Trigger.dev logs show successful moderation and deletion
-8. ✅ Users receive rejection notifications when content is rejected
+7. ✅ Users receive rejection notifications when content is rejected
 
 ## 📈 Storage Cost Savings
 
@@ -284,7 +222,6 @@ The system is now fully operational. No further action is required.
 **Monitoring recommendations**:
 1. Check Edge Function logs weekly to ensure the cron job is running
 2. Verify Bunny.net storage usage is not growing unexpectedly
-3. Monitor Trigger.dev logs for any moderation failures
 
 ## 📞 Support
 
@@ -292,8 +229,7 @@ If you encounter any issues:
 
 1. Check the troubleshooting section above
 2. Review Edge Function logs in Supabase Dashboard
-3. Review Trigger.dev logs for video moderation
-4. Verify all environment variables are set correctly
+3. Verify all environment variables are set correctly
 
 ---
 

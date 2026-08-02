@@ -17,11 +17,10 @@
 **ROOT CAUSE:** The moderation functions were updating the database but not calling Bunny.net DELETE API.
 
 **FIXES APPLIED:**
-1. ✅ Updated `trigger/moderate-pop-video.ts` to immediately delete rejected videos from Bunny.net
-2. ✅ Updated `supabase/functions/moderate-avatar/index.ts` to immediately delete rejected avatars
-3. ✅ Added deletion logic that runs BEFORE database deletion
-4. ✅ Added user notifications for rejected content
-5. ✅ Added comprehensive logging for every deletion attempt
+1. ✅ Updated video and avatar moderation to immediately delete rejected content from Bunny.net
+2. ✅ Added deletion logic that runs BEFORE database deletion
+3. ✅ Added user notifications for rejected content
+4. ✅ Added comprehensive logging for every deletion attempt
 
 ---
 
@@ -208,7 +207,7 @@ After implementing these fixes and setting up the credentials, you should see:
 - Bunny.net dashboard shows ZERO videos older than 3 days
 
 ### ✅ AI-Rejected Videos Deleted
-- When Trigger.dev moderation rejects a video, it's immediately deleted
+- When moderation rejects a video, it's immediately deleted
 - Deleted from BOTH Bunny.net AND Supabase database
 - User receives a notification about the rejection
 - Bunny.net dashboard shows ZERO rejected videos
@@ -246,10 +245,8 @@ After implementing these fixes and setting up the credentials, you should see:
 ### Issue: Rejected videos are not being deleted
 
 **Solution:**
-1. Check Trigger.dev logs to see if the moderation task is running
-2. Verify the `deleteFromBunnyNet` function is being called
-3. Check if Bunny.net credentials are set in Trigger.dev environment variables
-4. Look for error messages in the Trigger.dev task logs
+1. Verify the `deleteFromBunnyNet` function is being called
+2. Check the Edge Function logs for error messages
 
 ---
 
@@ -266,7 +263,7 @@ After implementing these fixes and setting up the credentials, you should see:
 ## 🔗 RELATED FILES
 
 - `supabase/functions/delete-expired-videos/index.ts` - Hourly cleanup Edge Function
-- `trigger/moderate-pop-video.ts` - Video moderation with immediate deletion
+- `supabase/functions/moderate-video/index.ts` - Video moderation with immediate deletion
 - `supabase/functions/moderate-avatar/index.ts` - Avatar moderation with immediate deletion
 - `supabase/migrations/20260113_fix_video_deletion_cron.sql` - Cron job setup
 

@@ -91,21 +91,11 @@ Look for error messages starting with `❌`
 
 ### Problem: AI-rejected videos are still stored
 
-**Solution 1**: Check Trigger.dev environment variables
+**Solution**: Check the `moderate-video` Edge Function logs
 
-Go to **Trigger.dev Dashboard** → **Your Project** → **Environment Variables**
+Go to **Supabase Dashboard** → **Edge Functions** → `moderate-video` → **Logs**
 
-Verify these exist:
-- `EXPO_PUBLIC_BUNNY_STREAM_LIBRARY_ID`
-- `EXPO_PUBLIC_BUNNY_STREAM_API_KEY`
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
-
-**Solution 2**: Check Trigger.dev logs
-
-Go to **Trigger.dev Dashboard** → **Your Project** → **Runs**
-
-Look for the `moderate-pop-video` task and check for errors
+Look for errors from the AWS Rekognition call or the Bunny.net delete step
 
 ---
 
@@ -120,16 +110,6 @@ Look for the `moderate-pop-video` task and check for errors
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 - `AWS_REGION`
-
-### Trigger.dev Environment Variables
-Set these in **Trigger.dev Dashboard** → **Your Project** → **Environment Variables**:
-- `EXPO_PUBLIC_BUNNY_STREAM_LIBRARY_ID`
-- `EXPO_PUBLIC_BUNNY_STREAM_API_KEY`
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
-- `AWS_REGION`
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
 
 ---
 
@@ -149,8 +129,7 @@ Your system is working correctly when:
 
 1. Check the full documentation: `docs/COMPLETE_DELETION_SYSTEM.md`
 2. Review Edge Function logs in Supabase Dashboard
-3. Review Trigger.dev logs for video moderation
-4. Verify all environment variables are set
+3. Verify all environment variables are set
 
 ---
 
