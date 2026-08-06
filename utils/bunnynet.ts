@@ -22,6 +22,31 @@ console.log('Bunny.net Configuration:', {
   streamCDN: BUNNY_STREAM_CDN_HOSTNAME || 'NOT SET',
 });
 
+export function isPremiumLibrary(libraryId?: number | string | null): boolean {
+  if (libraryId === undefined || libraryId === null || libraryId === '') return false;
+  const premiumLibraryId = Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_PREMIUM_LIBRARY_ID;
+  return Number(libraryId) === Number(premiumLibraryId);
+}
+
+export interface BunnyLibraryConfig {
+  libraryId: number;
+  apiKey: string;
+  cdnHostname: string;
+}
+
+export function getBunnyLibraryConfig(isPremium: boolean): BunnyLibraryConfig {
+  const libraryId = isPremium
+    ? Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_PREMIUM_LIBRARY_ID
+    : Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_LIBRARY_ID;
+  const apiKey = isPremium
+    ? Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_PREMIUM_API_KEY
+    : Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_API_KEY;
+  const cdnHostname = isPremium
+    ? Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_PREMIUM_CDN_HOSTNAME
+    : Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_CDN_HOSTNAME;
+  return { libraryId: Number(libraryId), apiKey, cdnHostname };
+}
+
 /**
  * Create a new video in Bunny.net Stream (for transcoding)
  * @param title - Title of the video

@@ -8,7 +8,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { IconSymbol } from '@/components/IconSymbol';
 import * as MediaLibrary from 'expo-media-library';
 import VideoFeedItem from '@/components/VideoFeedItem';
-import { getVideoPlaybackUrl, getVideoThumbnailUrl, getVideoDownloadUrl, getDownloadUrlViaEdgeFunction, deleteStreamVideo, getDeleteVideoViaEdgeFunction, extractVideoId } from '@/utils/bunnynet';
+import { getVideoPlaybackUrl, getVideoThumbnailUrl, getVideoDownloadUrl, getDownloadUrlViaEdgeFunction, deleteStreamVideo, getDeleteVideoViaEdgeFunction, extractVideoId, isPremiumLibrary } from '@/utils/bunnynet';
 import { supabase } from '@/lib/supabase';
 import { USE_TUS_UPLOAD, USE_EDGE_STATUS_CHECK, USE_EDGE_DELETE, USE_EDGE_DOWNLOAD } from '@/config/uploadFlags';
 import { colors } from '@/styles/commonStyles';
@@ -598,10 +598,7 @@ const handleRetryUpload = async (upload: any) => {
       .update({ upload_progress: 95, updated_at: new Date().toISOString() })
       .eq('id', upload.id);
 
-    const libraryId = isPremium ? 597832 : 517995;
-    const cdnHostname = isPremium
-      ? 'vz-bf878a45-f2f.b-cdn.net'
-      : 'vz-60af4a59-0b4.b-cdn.net';
+    const { libraryId, cdnHostname } = bunnynet.getBunnyLibraryConfig(isPremium);
 
     const { data: video, error: dbError } = await supabase
       .from('videos')
@@ -759,7 +756,7 @@ const checkDailyBonus = async () => {
   const bunnyVideoId = extractVideoId(rejectedVideo.video_url);
   if (bunnyVideoId) {
     try {
-      const isPremium = rejectedVideo.library_id === 597832;
+      const isPremium = isPremiumLibrary(rejectedVideo.library_id);
       if (USE_EDGE_DELETE) {
         await getDeleteVideoViaEdgeFunction(bunnyVideoId, isPremium);
       } else {
@@ -2081,7 +2078,7 @@ const handleSaveVideo = async (videoUrl: string, videoId: string, libraryId?: nu
       return;
     }
 
-    const isPremium = libraryId === 597832;
+    const isPremium = isPremiumLibrary(libraryId);
     const downloadUrl = USE_EDGE_DOWNLOAD
       ? await getDownloadUrlViaEdgeFunction(videoUrl, isPremium)
       : await getVideoDownloadUrl(videoUrl, libraryId);
@@ -2154,7 +2151,7 @@ const handleSaveVideo = async (videoUrl: string, videoId: string, libraryId?: nu
               if (video.video_url) {
                 const bunnyVideoId = extractVideoId(video.video_url);
                 if (bunnyVideoId) {
-                  const isPremium = video.library_id === 597832;
+                  const isPremium = isPremiumLibrary(video.library_id);
 if (USE_EDGE_DELETE) {
   await getDeleteVideoViaEdgeFunction(bunnyVideoId, isPremium);
 } else {
@@ -2371,7 +2368,7 @@ const handleVideoPress = (video: VideoPost, index: number, videoList: VideoPost[
                 if (video.video_url) {
                   const bunnyVideoId = extractVideoId(video.video_url);
                   if (bunnyVideoId) {
-                    const isPremium = video.library_id === 597832;
+                    const isPremium = isPremiumLibrary(video.library_id);
 if (USE_EDGE_DELETE) {
   await getDeleteVideoViaEdgeFunction(bunnyVideoId, isPremium);
 } else {

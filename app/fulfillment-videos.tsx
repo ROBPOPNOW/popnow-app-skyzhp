@@ -22,7 +22,7 @@ import { IconSymbol } from '@/components/IconSymbol';
 import * as MediaLibrary from 'expo-media-library';
 import { File, Directory, Paths } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
-import { getVideoDownloadUrl, getDownloadUrlViaEdgeFunction } from '@/utils/bunnynet';
+import { getVideoDownloadUrl, getDownloadUrlViaEdgeFunction, isPremiumLibrary } from '@/utils/bunnynet';
 import { requestMediaLibrarySavePermission } from '@/utils/permissions';
 import { USE_EDGE_DOWNLOAD } from '@/config/uploadFlags';
 // 🪙 PHASE 7 IMPORT
@@ -683,7 +683,7 @@ Alert.alert(
   }
   
   console.log('📚 Using library ID:', libraryId);
-  const isPremium = libraryId === 597832;
+  const isPremium = isPremiumLibrary(libraryId);
   downloadUrl = USE_EDGE_DOWNLOAD
     ? await getDownloadUrlViaEdgeFunction(videoUrl, isPremium)
     : await getVideoDownloadUrl(videoUrl, libraryId);

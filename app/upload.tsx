@@ -28,6 +28,8 @@ import {
   getVideoStatusViaEdgeFunction,
   deleteStreamVideo,
   getDeleteVideoViaEdgeFunction,
+  getBunnyLibraryConfig,
+  getVideoThumbnailUrl,
 } from '@/utils/bunnynet';
 import Constants from 'expo-constants';
 import { USE_TUS_UPLOAD, USE_EDGE_STATUS_CHECK, USE_EDGE_DELETE } from '@/config/uploadFlags';
@@ -502,7 +504,7 @@ const proceedWithUpload = async () => {
       }
 
       console.log('✅ Credentials validated');
-      console.log('  - Library ID: 517995 (hardcoded)');
+      console.log('  - Library ID:', Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_LIBRARY_ID);
       console.log('  - API Key: Present (length:', bunnyApiKey.length, ')');
     }
 
@@ -753,15 +755,15 @@ const proceedWithUpload = async () => {
         .update({ upload_progress: 95, updated_at: new Date().toISOString() })
         .eq('id', pendingUploadId);
 
+      if (!bunnyVideoId) {
+        throw new Error('Cannot save video: bunnyVideoId is null after upload');
+      }
+
       const videoUrl = bunnyVideoId;
 
       // 🆕 Determine which library and CDN to use based on premium status
-      const libraryId = isPremium ? 597832 : 517995;
-      const cdnHostname = isPremium 
-        ? Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_PREMIUM_CDN_HOSTNAME 
-        : Constants.expoConfig?.extra?.EXPO_PUBLIC_BUNNY_STREAM_CDN_HOSTNAME;
-
-      const thumbnailUrl = `https://${cdnHostname}/${bunnyVideoId}/thumbnail.jpg`;
+      const { libraryId, cdnHostname } = getBunnyLibraryConfig(isPremium);
+      const thumbnailUrl = getVideoThumbnailUrl(bunnyVideoId, libraryId);
 
       console.log('💾 Saving video to database...');
       console.log('  - Library ID:', libraryId, isPremium ? '(Premium)' : '(Free)');
