@@ -1,7 +1,7 @@
 import * as Linking from 'expo-linking';
 import React, { useEffect, useState, useRef } from "react";
 import { useFonts } from "expo-font";
-import { Stack, router, useSegments, useRootNavigationState } from "expo-router";
+import { Stack, router, useSegments, useRootNavigationState, usePathname } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { SystemBars } from "react-native-edge-to-edge";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
@@ -17,6 +17,8 @@ import { StatusBar } from "expo-status-bar";
 import { WidgetProvider } from "@/contexts/WidgetContext";
 import { supabase } from "@/lib/supabase";
 import Constants from 'expo-constants';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { isNewerVersion } from '@/utils/versionCheck';
 import Purchases from 'react-native-purchases';
 import * as Notifications from 'expo-notifications';
 import { 
@@ -26,6 +28,8 @@ import {
   addNotificationReceivedListener, 
   updateLastActive
 } from '@/utils/pushNotifications';
+import FloatingTabBar, { TabBarItem } from '@/components/FloatingTabBar';
+import UpdateAvailableModal from '@/components/UpdateAvailableModal';
 
 // Hide development breadcrumbs
 if (typeof document !== 'undefined' && !__DEV__) {
@@ -48,13 +52,79 @@ export const unstable_settings = {
 function RootLayoutNav() {
   const segments = useSegments();
   const navigationState = useRootNavigationState();
+  const pathname = usePathname();
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const notificationListener = useRef<any>(null);
   const responseListener = useRef<any>(null);
   const mountedRef = useRef(true);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const pushRegisteredRef = useRef(false);
+  const [showUpdateNudge, setShowUpdateNudge] = useState(false);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+
+  const fetchUnreadCount = async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { count } = await supabase
+        .from('notifications')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', user.id)
+        .eq('is_read', false);
+      if (mountedRef.current) setUnreadCount(count || 0);
+    } catch (error) {
+      console.error('Error fetching unread count:', error);
+    }
+  };
+
+  // 🔔 Check for a newer app version (soft, dismissible nudge — never blocks)
+  const checkForUpdate = async () => {
+    try {
+      const localVersion = Constants.expoConfig?.version;
+      if (!localVersion) return;
+
+      const { data, error } = await supabase
+        .from('app_config')
+        .select('value')
+        .eq('key', 'latest_version')
+        .single();
+
+      if (error || !data?.value) return;
+
+      const remoteVersion = data.value;
+      if (!isNewerVersion(remoteVersion, localVersion)) return;
+
+      const dismissedVersion = await AsyncStorage.getItem('dismissed_update_version');
+      if (dismissedVersion === remoteVersion) return;
+
+      if (!mountedRef.current) return;
+      setLatestVersion(remoteVersion);
+      setShowUpdateNudge(true);
+    } catch (error) {
+      console.error('Update check failed (non-fatal):', error);
+    }
+  };
+
+  const handleUpdatePress = () => {
+    const url = Platform.select({
+      ios: 'https://apps.apple.com/app/id6756990681',
+      android: 'https://play.google.com/store/apps/details?id=world.popnow.app',
+    });
+    if (url) Linking.openURL(url);
+    setShowUpdateNudge(false);
+  };
+
+  const handleUpdateLater = () => {
+    if (latestVersion) {
+      AsyncStorage.setItem('dismissed_update_version', latestVersion).catch(() => {});
+    }
+    setShowUpdateNudge(false);
+  };
 
   // 🔔 Register for push notifications
   const registerPushNotifications = async () => {
+    if (pushRegisteredRef.current) return;
+    pushRegisteredRef.current = true;
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
@@ -145,9 +215,29 @@ console.log('🔑 RevenueCat API key:', apiKey ? 'present' : 'MISSING');
       }
     );
 
+    // 🔔 Fetch initial unread count
+    fetchUnreadCount();
+
+    // 🔔 Real-time subscription for unread notifications
+    const notificationsSubscription = supabase
+      .channel('unread-notifications')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'notifications',
+        },
+        () => {
+          fetchUnreadCount();
+        }
+      )
+      .subscribe();
+
     return () => {
       mountedRef.current = false;
       authListener.subscription.unsubscribe();
+      notificationsSubscription.unsubscribe();
       if (notificationListener.current) {
         notificationListener.current.remove();
       }
@@ -247,7 +337,7 @@ console.log('🔑 RevenueCat API key:', apiKey ? 'present' : 'MISSING');
       }
       
       const videoAge = Date.now() - new Date(video.created_at).getTime();
-      const oneHourInMs = 60 * 60 * 1000;
+      const oneHourInMs = 24 * 60 * 60 * 1000;
       const isExpired = videoAge > oneHourInMs;
       const isRejected = video.moderation_status === 'rejected';
       
@@ -365,6 +455,28 @@ if (data.type === 'nearby_request' || data.type === 'nearby_request_needs_help')
     await navigateToVideoOrProfile(data.videoId, data.actorId);
   }
   return;  // ← ADD THIS
+  
+} else if (data.type === 'daily_digest') {
+  if (data.videoCount === 1 && data.latitude && data.longitude) {
+    // Single video — navigate to map centered on that video
+    router.push({
+      pathname: '/(tabs)/map',
+      params: {
+        focusLatitude: data.latitude.toString(),
+        focusLongitude: data.longitude.toString(),
+        zoom: '12',
+      },
+    });
+  } else {
+    // Multiple videos — navigate to map zoomed out to world view
+    router.push({
+      pathname: '/(tabs)/map',
+      params: {
+        zoom: '2',
+      },
+    });
+  }
+  return;
 }
 };
 
@@ -374,6 +486,9 @@ async function checkAuth() {
       console.log('Initial auth check:', session ? 'Authenticated' : 'Not authenticated');
       if (!mountedRef.current) return;
       setIsAuthenticated(!!session);
+
+      // 🔔 Check for app update (fire-and-forget, never blocks startup)
+      checkForUpdate();
 
 // Identify user with RevenueCat
 if (session?.user?.id) {
@@ -446,7 +561,7 @@ if (session?.user?.id) {
     }
   }
 
-  // Show loading while checking auth
+// Show loading while checking auth
   if (isAuthenticated === null) {
     return (
       <View style={styles.loadingContainer}>
@@ -455,8 +570,28 @@ if (session?.user?.id) {
     );
   }
 
+  const tabs: TabBarItem[] = [
+    { name: 'explore', route: '/(tabs)/(home)/', icon: 'binoculars.fill', label: 'Explore' },
+    { name: 'map', route: '/(tabs)/map', icon: 'map.fill', label: 'Map' },
+    { name: 'upload', route: '/record-video', icon: 'plus', label: 'Upload', isUpload: true },
+    { name: 'request', route: '/(tabs)/request', icon: 'hand.raised.fill', label: 'Request' },
+    { name: 'profile', route: '/(tabs)/profile', icon: 'person.fill', label: 'Profile' },
+  ];
+
+  const hideTabBarRoutes = [
+    '/record-video',
+    '/login',
+    '/edit-profile',
+    '/reset-password',
+    '/auth/callback',
+  ];
+
+  const showTabBar = isAuthenticated && !hideTabBarRoutes.some(route => pathname.startsWith(route));
+  const isExplorePage = pathname === '/' || pathname.includes('/(home)');
+
   return (
-    <Stack>
+    <View style={{ flex: 1 }}>
+      <Stack>
       <Stack.Screen name="login" options={{ headerShown: false }} />
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="settings" options={{ headerShown: false }} />
@@ -486,12 +621,12 @@ if (session?.user?.id) {
         }}
       />
       <Stack.Screen
-        name="record-video"
-        options={{
-          headerShown: false,
-          presentation: "fullScreenModal",
-        }}
-      />
+  name="record-video"
+  options={{
+    headerShown: false,
+    presentation: "card",
+  }}
+/>
       <Stack.Screen
         name="upload"
         options={{
@@ -500,12 +635,12 @@ if (session?.user?.id) {
         }}
       />
       <Stack.Screen
-        name="search-video-player"
-        options={{
-          headerShown: false,
-          presentation: "fullScreenModal",
-        }}
-      />
+  name="search-video-player"
+  options={{
+    headerShown: false,
+    presentation: "card", // ← change from fullScreenModal to card
+  }}
+/>
       <Stack.Screen
   name="followers-list"
   options={{
@@ -551,7 +686,7 @@ if (session?.user?.id) {
           sheetCornerRadius: 20,
         }}
       />
-      <Stack.Screen
+<Stack.Screen
         name="transparent-modal"
         options={{
           presentation: "transparentModal",
@@ -559,7 +694,17 @@ if (session?.user?.id) {
         }}
       />
     </Stack>
-  );
+    {showTabBar && (
+      <FloatingTabBar tabs={tabs} isTransparent={false} unreadCount={unreadCount} />
+    )}
+    <UpdateAvailableModal
+      visible={showUpdateNudge}
+      latestVersion={latestVersion ?? ''}
+      onUpdate={handleUpdatePress}
+      onLater={handleUpdateLater}
+    />
+  </View>
+);
 }
 
 export default function RootLayout() {
