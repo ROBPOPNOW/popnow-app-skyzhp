@@ -11,7 +11,7 @@ import {
   ActivityIndicator,
   Platform,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { IconSymbol } from '@/components/IconSymbol';
@@ -23,7 +23,13 @@ export const unstable_settings = {
   headerShown: false,
 };
 
+// FloatingTabBar visual height, excluding the safe-area inset (added below via
+// insets.bottom). Matches the constant in app/(tabs)/search.tsx.
+const TAB_BAR_HEIGHT = 48;
+
 export default function PremiumUpgradeScreen() {
+  const insets = useSafeAreaInsets();
+  const tabBarHeight = TAB_BAR_HEIGHT + insets.bottom;
   const [loading, setLoading] = useState(true);
   const [packages, setPackages] = useState<PurchasesPackage[]>([]);
   const [isPurchasing, setIsPurchasing] = useState(false);
@@ -60,6 +66,32 @@ export default function PremiumUpgradeScreen() {
     }
   };
 
+  const PREMIUM_SYNC_POLL_ATTEMPTS = 8;
+  const PREMIUM_SYNC_POLL_INTERVAL_MS = 1500;
+
+  // revenuecat-webhook is what actually marks the user premium in the DB now
+  // (RevenueCat: usually delivered within 5-60s). This screen no longer
+  // writes is_premium itself — it waits briefly for that write to land so
+  // "Welcome to Premium" doesn't show before the rest of the app can see it.
+  const waitForPremiumSync = async (): Promise<boolean> => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return false;
+
+    for (let attempt = 0; attempt < PREMIUM_SYNC_POLL_ATTEMPTS; attempt++) {
+      const { data } = await supabase
+        .from('users')
+        .select('is_premium')
+        .eq('id', user.id)
+        .single();
+
+      if (data?.is_premium) return true;
+
+      await new Promise((resolve) => setTimeout(resolve, PREMIUM_SYNC_POLL_INTERVAL_MS));
+    }
+
+    return false;
+  };
+
   const handleSubscribe = async () => {
     if (packages.length === 0) {
       Alert.alert('Error', 'No subscription packages available');
@@ -78,96 +110,33 @@ export default function PremiumUpgradeScreen() {
       console.log('✅ Purchase successful!');
 
       if (customerInfo.entitlements.active['premium']) {
-        console.log('🎉 Premium activated!');
+        console.log('🎉 Premium activated with RevenueCat — waiting for webhook to sync...');
 
-        try {
-          const entitlement = customerInfo.entitlements.active['premium'];
+        const synced = await waitForPremiumSync();
 
-          const { data: { user } } = await supabase.auth.getUser();
-
-          if (user) {
-            const { error: updateError } = await supabase.from('users').update({
-              is_premium: true,
-              premium_expires_at: entitlement.expirationDate || null,
-              premium_platform: Platform.OS === 'ios' ? 'apple' : 'google',
-              revenuecat_user_id: customerInfo.originalAppUserId || null,
-              premium_product_id: entitlement.productIdentifier || null,
-            }).eq('id', user.id);
-
-            if (updateError) {
-              console.error('❌ Supabase update ERROR:', JSON.stringify(updateError));
-            } else {
-              console.log('✅ Supabase updated with premium status');
-              // Add 1000 POPCoins bonus
-              console.log('🍿 Adding 1000 POPCoins bonus...');
-              const { data: userData } = await supabase
-                .from('users')
-                .select('coins')
-                .eq('id', user.id)
-                .single();
-
-              const currentCoins = userData?.coins || 0;
-              const { error: coinError } = await supabase
-                .from('users')
-                .update({ coins: currentCoins + 1000 })
-                .eq('id', user.id);
-
-              if (coinError) {
-                console.error('❌ Error adding coins:', coinError);
-              } else {
-                console.log('✅ 1000 POPCoins added! New balance:', currentCoins + 1000);
-              }
-
-              // Record coin transaction
-              await supabase.from('coin_transactions').insert({
-                user_id: user.id,
-                amount: 1000,
-                type: 'premium_purchase',
-                description: 'Premium subscription bonus',
-              });
-
-              // Create premium notification
-              await supabase.from('notifications').insert({
-                user_id: user.id,
-                actor_id: user.id,
-                type: 'premium_purchased',
-                message: '🎉 Welcome to Premium! You received 1000 POPCoins bonus!',
-              });
-
-              // Send push notification
-              const { data: pushData } = await supabase
-                .from('users')
-                .select('push_token')
-                .eq('id', user.id)
-                .single();
-
-              if (pushData?.push_token) {
-                await supabase.functions.invoke('send-push-notification', {
-                  body: {
-                    pushToken: pushData.push_token,
-                    title: '👑 Welcome to Premium!',
-                    body: 'You received 1000 POPCoins bonus! Enjoy unlimited features.',
-                    data: { type: 'premium_purchased' },
-                  },
-                });
-                console.log('✅ Premium push notification sent');
-              }
-            }
-          }
-        } catch (dbError) {
-          console.error('⚠️ Failed to update Supabase:', dbError);
+        if (synced) {
+          Alert.alert(
+            'Welcome to Premium! 🎉',
+            'Your premium subscription is now active. Enjoy unlimited features!',
+            [
+              {
+                text: 'Start Exploring',
+                onPress: () => router.back(),
+              },
+            ]
+          );
+        } else {
+          Alert.alert(
+            'Purchase Successful! 🎉',
+            "Your payment went through. Premium features may take a minute to activate — pull to refresh if you don't see them shortly.",
+            [
+              {
+                text: 'OK',
+                onPress: () => router.back(),
+              },
+            ]
+          );
         }
-
-        Alert.alert(
-          'Welcome to Premium! 🎉',
-          'Your premium subscription is now active. Enjoy unlimited features!',
-          [
-            {
-              text: 'Start Exploring',
-              onPress: () => router.back(),
-            },
-          ]
-        );
       } else {
         console.log('⚠️ No premium entitlement found after purchase');
       }
@@ -197,6 +166,10 @@ export default function PremiumUpgradeScreen() {
       console.log('✅ Restore complete');
 
       if (customerInfo.entitlements.active['premium']) {
+        // Sync status only — restorePurchases() fires no webhook, so this is
+        // the only recovery path if the original purchase webhook never ran.
+        // NEVER coins/coin_transactions/notifications here — that 30-day
+        // window was the farming hole this whole rebuild exists to close.
         try {
           const entitlement = customerInfo.entitlements.active['premium'];
 
@@ -214,77 +187,11 @@ export default function PremiumUpgradeScreen() {
             if (updateError) {
               console.error('❌ Supabase update ERROR:', JSON.stringify(updateError));
             } else {
-              console.log('✅ Supabase updated with premium status (restore)');
-              
-              // Check if user already received premium bonus for this subscription period
-              const { data: existingBonus } = await supabase
-                .from('coin_transactions')
-                .select('id')
-                .eq('user_id', user.id)
-                .eq('type', 'premium_purchase')
-                .gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString())
-                .limit(1);
-
-              if (existingBonus && existingBonus.length > 0) {
-                console.log('ℹ️ User already received premium bonus this month, skipping coins');
-              } else {
-              const { data: userData } = await supabase
-                .from('users')
-                .select('coins')
-                .eq('id', user.id)
-                .single();
-
-              const currentCoins = userData?.coins || 0;
-              const { error: coinError } = await supabase
-                .from('users')
-                .update({ coins: currentCoins + 1000 })
-                .eq('id', user.id);
-
-              if (coinError) {
-                console.error('❌ Error adding coins:', coinError);
-              } else {
-                console.log('✅ 1000 POPCoins added! New balance:', currentCoins + 1000);
-              }
-
-              // Record coin transaction
-              await supabase.from('coin_transactions').insert({
-                user_id: user.id,
-                amount: 1000,
-                type: 'premium_purchase',
-                description: 'Premium subscription restored bonus',
-              });
-
-              // Create premium notification
-              await supabase.from('notifications').insert({
-                user_id: user.id,
-                actor_id: user.id,
-                type: 'premium_purchased',
-                message: '🎉 Welcome back to Premium! You received 1000 POPCoins bonus!',
-              });
-
-              // Send push notification
-              const { data: pushData } = await supabase
-                .from('users')
-                .select('push_token')
-                .eq('id', user.id)
-                .single();
-
-              if (pushData?.push_token) {
-                await supabase.functions.invoke('send-push-notification', {
-                  body: {
-                    pushToken: pushData.push_token,
-                    title: '👑 Welcome back to Premium!',
-                    body: 'You received 1000 POPCoins bonus! Enjoy unlimited features.',
-                    data: { type: 'premium_purchased' },
-                  },
-                });
-               console.log('✅ Premium restore push notification sent');
-              }
-              }
+              console.log('✅ Premium status synced on restore (no coins granted)');
             }
           }
         } catch (dbError) {
-          console.error('⚠️ Failed to update Supabase:', dbError);
+          console.error('⚠️ Failed to sync premium status on restore:', dbError);
         }
 
         Alert.alert(
@@ -355,7 +262,11 @@ export default function PremiumUpgradeScreen() {
         <Text style={styles.headerSubtitle}>Unlock the full POPNOW experience</Text>
       </LinearGradient>
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        style={styles.content}
+        contentContainerStyle={{ paddingBottom: tabBarHeight + 16 }}
+        showsVerticalScrollIndicator={false}
+      >
         {/* Benefits List */}
         <View style={styles.benefitsContainer}>
           <BenefitItem
@@ -436,8 +347,6 @@ export default function PremiumUpgradeScreen() {
             <Text style={styles.footerLink}>Privacy</Text>
           </Pressable>
         </View>
-
-        <View style={{ height: 40 }} />
       </ScrollView>
     </SafeAreaView>
   );
