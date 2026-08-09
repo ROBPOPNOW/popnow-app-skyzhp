@@ -992,6 +992,12 @@ const loadLikedVideos = async () => {
     const videoIds = likesData.map(like => like.video_id);
     console.log('📹 Loading details for', videoIds.length, 'videos');
 
+    // Liked tab follows the same 24-hour public rule as the feed/map — a
+    // liked video that's aged out of public visibility disappears from
+    // Liked too, for everyone, including the liker's own videos.
+    const twentyFourHoursAgo = new Date();
+    twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
+
     // 🚨 CRITICAL: Fresh query for video details (no cache)
     const { data: videosData, error: videosError } = await supabase
   .from('videos')
@@ -1020,7 +1026,8 @@ const loadLikedVideos = async () => {
     is_premium
   )
 `)
-  .in('id', videoIds);
+  .in('id', videoIds)
+  .gte('created_at', twentyFourHoursAgo.toISOString());
 
     if (videosError) {
       console.error('❌ Error loading video details:', videosError);
