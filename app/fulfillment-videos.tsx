@@ -332,82 +332,13 @@ const getCurrentUser = async () => {
   }
 };
 
-  const handleLike = async (videoId: string) => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        Alert.alert('Error', 'You must be logged in to like videos');
-        return;
-      }
-
-      // Check if already liked
-      const { data: existingLike } = await supabase
-        .from('likes')
-        .select('id')
-        .eq('video_id', videoId)
-        .eq('user_id', user.id)
-        .single();
-
-      if (existingLike) {
-        // Unlike
-        await supabase
-          .from('likes')
-          .delete()
-          .eq('video_id', videoId)
-          .eq('user_id', user.id);
-
-        // Decrement likes count
-        const { data: currentVideo } = await supabase
-          .from('videos')
-          .select('likes_count')
-          .eq('id', videoId)
-          .single();
-
-        if (currentVideo) {
-          const newCount = Math.max(0, (currentVideo.likes_count || 0) - 1);
-          await supabase
-            .from('videos')
-            .update({ likes_count: newCount })
-            .eq('id', videoId);
-        }
-
-        setVideos(videos.map(v =>
-          v.id === videoId
-            ? { ...v, likes: Math.max(0, v.likes - 1), likes_count: Math.max(0, (v.likes_count || 0) - 1), isLiked: false }
-            : v
-        ));
-      } else {
-        // Like
-        await supabase
-          .from('likes')
-          .insert({ video_id: videoId, user_id: user.id });
-
-        // Increment likes count
-        const { data: currentVideo } = await supabase
-          .from('videos')
-          .select('likes_count')
-          .eq('id', videoId)
-          .single();
-
-        if (currentVideo) {
-          const newCount = (currentVideo.likes_count || 0) + 1;
-          await supabase
-            .from('videos')
-            .update({ likes_count: newCount })
-            .eq('id', videoId);
-        }
-
-        setVideos(videos.map(v =>
-          v.id === videoId
-            ? { ...v, likes: v.likes + 1, likes_count: (v.likes_count || 0) + 1, isLiked: true }
-            : v
-        ));
-      }
-    } catch (error) {
-      console.error('Error liking video:', error);
-      Alert.alert('Error', 'Failed to like video');
-    }
-  };
+  const handleLike = useCallback((videoId: string, newIsLiked: boolean, newLikesCount: number) => {
+    setVideos(prev => prev.map(v =>
+      v.id === videoId
+        ? { ...v, isLiked: newIsLiked, likes_count: newLikesCount, likes: newLikesCount }
+        : v
+    ));
+  }, []);
 
   const handleViewChange = useCallback((videoId: string) => {
     // Track view only once per video

@@ -2206,85 +2206,18 @@ if (USE_EDGE_DELETE) {
     }
   };
 
-const handleLike = async (videoId: string) => {
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('🎯 PROFILE: LIKE HANDLER CALLED');
-  console.log('  Video ID:', videoId);
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-
-    // Find the video in current list
-    const video = videos.find(v => v.id === videoId);
-    if (!video) {
-      console.log('⚠️ Video not found in videos list');
-      return;
-    }
-
-    const currentIsLiked = video.isLiked;
-    console.log('  Current isLiked:', currentIsLiked);
-
-    if (currentIsLiked) {
-      // Unlike: Remove from likes table
-      console.log('➖ Removing like...');
-      const { error } = await supabase
-        .from('likes')
-        .delete()
-        .eq('video_id', videoId)
-        .eq('user_id', user.id);
-
-      if (error) {
-        console.error('❌ Error removing like:', error);
-        return;
-      }
-
-      console.log('✅ Like removed - trigger will update videos.likes_count');
-
-      // Update local state optimistically
-      setVideos(videos.map(v =>
-        v.id === videoId
-          ? { 
-              ...v, 
-              isLiked: false, 
-              likes_count: Math.max(0, (v.likes_count || 0) - 1)
-            }
-          : v
-      ));
-    } else {
-      // Like: Insert into likes table
-      console.log('➕ Adding like...');
-      const { error } = await supabase
-        .from('likes')
-        .insert({ video_id: videoId, user_id: user.id });
-
-      if (error) {
-        console.error('❌ Error adding like:', error);
-        return;
-      }
-
-      console.log('✅ Like added - trigger will update videos.likes_count');
-
-      // Update local state optimistically
-      setVideos(videos.map(v =>
-        v.id === videoId
-          ? { 
-              ...v, 
-              isLiked: true, 
-              likes_count: (v.likes_count || 0) + 1
-            }
-          : v
-      ));
-    }
-
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('✅ PROFILE: LIKE OPERATION COMPLETE');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  } catch (error) {
-    console.error('❌ Error toggling like:', error);
-  }
-};
+const handleLike = useCallback((videoId: string, newIsLiked: boolean, newLikesCount: number) => {
+  setVideos(prev => prev.map(v =>
+    v.id === videoId
+      ? { ...v, isLiked: newIsLiked, likes_count: newLikesCount, likes: newLikesCount }
+      : v
+  ));
+  setLikedVideos(prev => prev.map(v =>
+    v.id === videoId
+      ? { ...v, isLiked: newIsLiked, likes_count: newLikesCount, likes: newLikesCount }
+      : v
+  ));
+}, []);
 
 const handleVideoPress = (video: VideoPost, index: number, videoList: VideoPost[]) => {
   router.push({
