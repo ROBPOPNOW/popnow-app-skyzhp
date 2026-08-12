@@ -24,7 +24,7 @@ import { VideoPost } from '@/types/video';
 import { requestLocationPermission } from '@/utils/permissions';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAdManager } from '@/hooks/useAdManager';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 
 interface VideoLocation {
   id: string;
@@ -69,6 +69,7 @@ export default function MapScreen() {
   const isInitialLoad = useRef(true);
   const swipeGestureRef = useRef<PanGestureHandler>(null);
   const hasRequestedPermission = useRef(false);
+  const lastLoadedAt = useRef<number>(0);
   const [isGpsReady, setIsGpsReady] = useState(false);
   const [locationDenied, setLocationDenied] = useState(false);
   const params = useLocalSearchParams();
@@ -84,6 +85,22 @@ export default function MapScreen() {
       if (val === 'true') setIsDarkMap(true);
     });
   }, []);
+
+  // 🔄 Reload videos when map tab is focused (if older than 5 minutes)
+useFocusEffect(
+  useCallback(() => {
+    if (!isInitialLoad.current) {
+      const fiveMinutes = 5 * 60 * 1000;
+      const timeSinceLastLoad = Date.now() - lastLoadedAt.current;
+      if (timeSinceLastLoad > fiveMinutes) {
+        console.log('🔄 Map focused — reloading videos (5min threshold)');
+        loadVideoLocations();
+      } else {
+        console.log('⚡ Map focused — skipping reload (loaded recently)');
+      }
+    }
+  }, [])
+);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -106,19 +123,35 @@ export default function MapScreen() {
 
 // ⚡ Handle navigation from feed with video location - runs when params change
   useEffect(() => {
-    if (params.centerLat && params.centerLng && params.fromFeed === 'true') {
-      const centerLat = parseFloat(params.centerLat as string);
-      const centerLng = parseFloat(params.centerLng as string);
+    if (params.videoId && params.fromFeed === 'true') {
+      // Focused on a specific video. loadVideoLocations will find it by ID and
+      // centre on its privacy-safe display point — no coords needed here.
+      if (mountedRef.current) setIsGpsReady(true);
+      loadVideoLocations();
+    }
+  }, [params.videoId, params.fromFeed]);
 
-      if (!isNaN(centerLat) && !isNaN(centerLng)) {
-        const videoCenter = { latitude: centerLat, longitude: centerLng };
-        if (mountedRef.current) setInitialMapCenter(videoCenter);
+  // 🔔 Handle daily digest notification tap
+  useEffect(() => {
+    if (params.zoom) {
+      const zoomLevel = parseInt(params.zoom as string);
+      if (!isNaN(zoomLevel)) {
+        if (zoomLevel <= 3) {
+          // World view — clear center so map shows world
+          if (mountedRef.current) setInitialMapCenter(null);
+        } else if (params.focusLatitude && params.focusLongitude) {
+          // Single video — center on that location
+          const lat = parseFloat(params.focusLatitude as string);
+          const lng = parseFloat(params.focusLongitude as string);
+          if (!isNaN(lat) && !isNaN(lng)) {
+            if (mountedRef.current) setInitialMapCenter({ latitude: lat, longitude: lng });
+          }
+        }
         if (mountedRef.current) setIsGpsReady(true);
-        // Load videos to show the pin
         loadVideoLocations();
       }
     }
-  }, [params.centerLat, params.centerLng, params.fromFeed]);
+  }, [params.zoom, params.focusLatitude, params.focusLongitude]);
 
   // Handle deep link to specific request from notification
   useEffect(() => {
@@ -159,14 +192,11 @@ export default function MapScreen() {
         if (mountedRef.current) setIsPremium(userData?.is_premium || false);
       }
 
-      // ⚡ STEP 0: Check if navigating from feed with video location (HIGHEST PRIORITY)
-      if (params.centerLat && params.centerLng && params.fromFeed === 'true') {
-        const centerLat = parseFloat(params.centerLat as string);
-        const centerLng = parseFloat(params.centerLng as string);
-
-        if (!isNaN(centerLat) && !isNaN(centerLng)) {
-          const videoCenter = { latitude: centerLat, longitude: centerLng };
-          if (mountedRef.current) setInitialMapCenter(videoCenter);
+      // ⚡ STEP 0: Check if navigating from feed focused on a video (HIGHEST PRIORITY)
+      if (params.videoId && params.fromFeed === 'true') {
+        {
+          // loadVideoLocations() finds the video by ID and centres on its
+          // privacy-safe display point. No coordinates are passed or read here.
           if (mountedRef.current) setHasInitializedMap(true);
           if (mountedRef.current) setIsGpsReady(true);
 
@@ -380,16 +410,34 @@ const getCurrentLocation = async () => {
     }
   };
 
-  const getRandomPointInRadius = useCallback((lat: number, lon: number, radiusKm: number) => {
-    const radiusInDegrees = radiusKm / 111.32;
-    const angle = Math.random() * 2 * Math.PI;
-    const distance = Math.random() * radiusInDegrees;
+  // 🔒 Deterministic privacy offset. The same video/request ID always produces
+  // the SAME point within the radius, so the pin is stable across reloads.
+  // Stability matters for privacy: a pin that re-randomised every load could be
+  // averaged over many samples to recover the true centre. True coordinates are
+  // only ever used as the hidden anchor for this offset — never displayed.
+  const getPrivacyOffsetPoint = useCallback(
+    (seed: string, lat: number, lon: number, radiusKm: number) => {
+      // FNV-1a hash of the seed → two deterministic pseudo-random values.
+      let h = 0x811c9dc5;
+      for (let i = 0; i < seed.length; i++) {
+        h ^= seed.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+      }
+      const r1 = ((h >>> 0) % 1000000) / 1000000;
+      const h2 = Math.imul(h ^ 0x9e3779b9, 0x85ebca6b);
+      const r2 = ((h2 >>> 0) % 1000000) / 1000000;
 
-    const newLat = lat + (distance * Math.cos(angle));
-    const newLon = lon + (distance * Math.sin(angle)) / Math.cos(lat * Math.PI / 180);
+      const radiusInDegrees = radiusKm / 111.32;
+      const angle = r1 * 2 * Math.PI;
+      // sqrt keeps the distribution uniform across the disk (no centre clustering).
+      const distance = Math.sqrt(r2) * radiusInDegrees;
 
-    return { latitude: newLat, longitude: newLon };
-  }, []);
+      const newLat = lat + distance * Math.cos(angle);
+      const newLon = lon + (distance * Math.sin(angle)) / Math.cos((lat * Math.PI) / 180);
+      return { latitude: newLat, longitude: newLon };
+    },
+    []
+  );
 
   const loadVideoLocations = async () => {
     try {
@@ -417,7 +465,7 @@ const getCurrentLocation = async () => {
       }
 
       const oneHourAgo = new Date();
-      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+      oneHourAgo.setHours(oneHourAgo.getHours() - 24);
       const oneHourAgoISO = oneHourAgo.toISOString();
 
       const [videosResult, requestsResult] = await Promise.all([
@@ -455,6 +503,13 @@ const getCurrentLocation = async () => {
         ? (videos || []).filter(v => !blockedUserIds.includes(v.user_id))
         : (videos || []);
 
+      // 🔒 If we arrived here focused on a specific video, we'll centre the map
+      // on that video's PRIVACY-SAFE display point (computed below), never its
+      // true coordinates. Captured during the loop, applied after it.
+      let focusedCenter: { latitude: number; longitude: number } | null = null;
+      const focusedVideoId =
+        params.fromFeed === 'true' && params.videoId ? (params.videoId as string) : null;
+
       filteredVideos.forEach((video) => {
         const lat = video.location_latitude;
         const lon = video.location_longitude;
@@ -468,21 +523,23 @@ const getCurrentLocation = async () => {
         let displayLat = lat;
         let displayLon = lon;
 
-        const isVideoFromFeed = params.videoId === video.id && params.fromFeed === 'true';
+        // 🔒 Always apply a deterministic privacy offset for 3km/10km videos,
+        // no matter how the user reached this screen. 'exact' videos keep their
+        // true coordinates (the uploader chose to share them precisely).
+        if (privacyRadius === '3km') {
+          const p = getPrivacyOffsetPoint(video.id, lat, lon, 3);
+          displayLat = p.latitude;
+          displayLon = p.longitude;
+        } else if (privacyRadius === '10km') {
+          const p = getPrivacyOffsetPoint(video.id, lat, lon, 10);
+          displayLat = p.latitude;
+          displayLon = p.longitude;
+        }
 
-        if (isVideoFromFeed && params.centerLat && params.centerLng) {
-          displayLat = parseFloat(params.centerLat as string);
-          displayLon = parseFloat(params.centerLng as string);
-        } else {
-          if (privacyRadius === '3km') {
-            const randomPoint = getRandomPointInRadius(lat, lon, 3);
-            displayLat = randomPoint.latitude;
-            displayLon = randomPoint.longitude;
-          } else if (privacyRadius === '10km') {
-            const randomPoint = getRandomPointInRadius(lat, lon, 10);
-            displayLat = randomPoint.latitude;
-            displayLon = randomPoint.longitude;
-          }
+        // If this is the video we navigated to, remember its safe display point
+        // so we can centre the map on it (matching the pin exactly).
+        if (focusedVideoId && video.id === focusedVideoId) {
+          focusedCenter = { latitude: displayLat, longitude: displayLon };
         }
 
         const locationKey = `video_${video.id}`;
@@ -519,13 +576,13 @@ const getCurrentLocation = async () => {
         let displayLon = lon;
 
         if (locationType === '3km') {
-          const randomPoint = getRandomPointInRadius(lat, lon, 3);
-          displayLat = randomPoint.latitude;
-          displayLon = randomPoint.longitude;
+          const p = getPrivacyOffsetPoint(request.id, lat, lon, 3);
+          displayLat = p.latitude;
+          displayLon = p.longitude;
         } else if (locationType === '10km') {
-          const randomPoint = getRandomPointInRadius(lat, lon, 10);
-          displayLat = randomPoint.latitude;
-          displayLon = randomPoint.longitude;
+          const p = getPrivacyOffsetPoint(request.id, lat, lon, 10);
+          displayLat = p.latitude;
+          displayLon = p.longitude;
         }
 
         const locationKey = `request_${request.id}`;
@@ -542,8 +599,16 @@ const getCurrentLocation = async () => {
         });
       });
 
+      // 🔒 Centre on the focused video's privacy-safe point (if we found it).
+      // This runs before loading finishes, so the map opens already centred on
+      // the offset location — never the true one.
+      if (focusedCenter && mountedRef.current) {
+        setInitialMapCenter(focusedCenter);
+      }
+
       if (mountedRef.current) setVideoLocations(locations);
       if (mountedRef.current) setHeatmapData(heatPoints);
+      lastLoadedAt.current = Date.now();
 
     } catch (error) {
       console.error('Error in loadVideoLocations:', error);
@@ -595,7 +660,7 @@ const getCurrentLocation = async () => {
       const { data: { user } } = await supabase.auth.getUser();
 
       const oneHourAgo = new Date();
-      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+      oneHourAgo.setHours(oneHourAgo.getHours() - 24);
       const oneHourAgoISO = oneHourAgo.toISOString();
 
       const { data: videos, error } = await supabase
@@ -731,81 +796,14 @@ const getCurrentLocation = async () => {
     }
   }, [handleCloseModal]);
 
-  const handleLike = async (videoId: string) => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        Alert.alert('Error', 'You must be logged in to like videos');
-        return;
-      }
-
-      const { data: existingLike } = await supabase
-        .from('likes')
-        .select('id')
-        .eq('video_id', videoId)
-        .eq('user_id', user.id)
-        .single();
-
-      if (existingLike) {
-        await supabase.from('likes').delete().eq('video_id', videoId).eq('user_id', user.id);
-
-        const { data: currentVideo } = await supabase
-          .from('videos')
-          .select('likes_count')
-          .eq('id', videoId)
-          .single();
-
-        if (currentVideo) {
-          const newCount = Math.max(0, (currentVideo.likes_count || 0) - 1);
-          await supabase.from('videos').update({ likes_count: newCount }).eq('id', videoId);
-
-          const channel = supabase.channel(`video:${videoId}:stats`);
-          await channel.send({
-            type: 'broadcast',
-            event: 'stats_updated',
-            payload: { video_id: videoId, likes_count: newCount },
-          });
-        }
-      } else {
-        await supabase.from('likes').insert({ video_id: videoId, user_id: user.id });
-
-        const { data: currentVideo } = await supabase
-          .from('videos')
-          .select('likes_count')
-          .eq('id', videoId)
-          .single();
-
-        if (currentVideo) {
-          const newCount = (currentVideo.likes_count || 0) + 1;
-          await supabase.from('videos').update({ likes_count: newCount }).eq('id', videoId);
-
-          const channel = supabase.channel(`video:${videoId}:stats`);
-          await channel.send({
-            type: 'broadcast',
-            event: 'stats_updated',
-            payload: { video_id: videoId, likes_count: newCount },
-          });
-        }
-      }
-
-      if (mountedRef.current) setSelectedVideos((prev) =>
-        prev.map((video) =>
-          video.id === videoId
-            ? {
-                ...video,
-                likes_count: existingLike
-                  ? Math.max(0, (video.likes_count || 0) - 1)
-                  : (video.likes_count || 0) + 1,
-                isLiked: !existingLike,
-              }
-            : video
-        )
-      );
-    } catch (error) {
-      console.error('Error liking video:', error);
-      Alert.alert('Error', 'Failed to like video');
-    }
-  };
+  const handleLike = useCallback((videoId: string, newIsLiked: boolean, newLikesCount: number) => {
+    if (!mountedRef.current) return;
+    setSelectedVideos(prev => prev.map(v =>
+      v.id === videoId
+        ? { ...v, isLiked: newIsLiked, likes_count: newLikesCount, likes: newLikesCount }
+        : v
+    ));
+  }, []);
 
   const handleViewChange = (videoId: string) => {
     if (typeof trackVideoView === 'function') {
@@ -867,10 +865,13 @@ const handleAvatarPress = useCallback((userId: string) => {
 return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaView style={styles.container} edges={['top']}>
-        <Pressable onPress={() => router.push('/(tabs)/search')} style={styles.searchButtonTopRight}>
-          <IconSymbol name="magnifyingglass" size={24} color="#FFFFFF" />
-        </Pressable>
+        {!modalVisible && (
+          <Pressable onPress={() => router.push('/(tabs)/search')} style={styles.searchButtonTopLeft}>
+            <IconSymbol name="magnifyingglass" size={24} color="#FFFFFF" />
+          </Pressable>
+        )}
 
+        {!modalVisible && (
         <View style={[
           styles.infoBannerTop,
           (mapZoomLevel === 'world' || mapZoomLevel === 'country') && styles.infoBannerTopPushed
@@ -885,12 +886,13 @@ return (
             Can't find what you're looking for? Double-tap to request a video!
           </Text>
         </View>
+        )}
 
         <LeafletMap
           key="map-instance"
           markers={videoLocations}
           center={initialMapCenter || undefined}
-          zoom={12}
+          zoom={params.zoom ? parseInt(params.zoom as string) : 12}
           onMarkerPress={handleMarkerPress}
           onLocateMePress={handleLocateMe}
           onDoubleTap={handleMapDoubleTap}
@@ -901,8 +903,11 @@ return (
           locationDenied={locationDenied}
           onZoomChange={setMapZoomLevel}
           isDarkMode={isDarkMap}
+          hideControls={modalVisible}
         />
 
+        {!modalVisible && (
+        <>
         <Pressable
           style={styles.legendButton}
           onPress={() => setShowLegend(!showLegend)}
@@ -962,17 +967,14 @@ return (
           {isRefreshing ? (
             <ActivityIndicator size="small" color="#FFFFFF" />
           ) : (
-            <IconSymbol name="arrow.clockwise" size={24} color="#FFFFFF" />
+            <IconSymbol name="arrow.clockwise" size={20} color="#FFFFFF" />
           )}
         </Pressable>
+        </>
+        )}
 
-        <Modal
-          visible={modalVisible}
-          animationType="slide"
-          presentationStyle="fullScreen"
-          onRequestClose={handleCloseModal}
-        >
-          <GestureHandlerRootView style={{ flex: 1 }}>
+        {modalVisible && (
+          <GestureHandlerRootView style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 999 }}>
             <PanGestureHandler
               ref={swipeGestureRef}
               onHandlerStateChange={handleModalSwipe}
@@ -981,6 +983,35 @@ return (
               enabled={true}
             >
               <SafeAreaView style={styles.modalContainer} edges={['top', 'bottom']}>
+                {/* Search button - top left */}
+                <Pressable
+                  style={styles.modalSearchButton}
+                  onPress={() => {
+                    handleCloseModal();
+                    router.push('/(tabs)/search');
+                  }}
+                >
+                  <IconSymbol
+                    ios_icon_name="magnifyingglass"
+                    android_material_icon_name="search"
+                    size={20}
+                    color="#FFFFFF"
+                  />
+                </Pressable>
+
+                {/* Close button - top right */}
+                <Pressable
+                  style={styles.modalCloseButton}
+                  onPress={handleCloseModal}
+                >
+                  <IconSymbol
+                    ios_icon_name="xmark"
+                    android_material_icon_name="close"
+                    size={20}
+                    color="#FFFFFF"
+                  />
+                </Pressable>
+
                 <FlatList
                   ref={flatListRef}
                   data={selectedVideos}
@@ -1001,7 +1032,7 @@ return (
               </SafeAreaView>
             </PanGestureHandler>
           </GestureHandlerRootView>
-        </Modal>
+        )}
       </SafeAreaView>
     </GestureHandlerRootView>
   );
@@ -1024,25 +1055,25 @@ const styles = StyleSheet.create({
   },
   refreshButton: {
     position: 'absolute',
-    bottom: 180,
+    bottom: 172,
     right: 20,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
     backgroundColor: colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4.65,
-    elevation: 8,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+    elevation: 6,
     zIndex: 1000,
   },
-  searchButtonTopRight: {
+  searchButtonTopLeft: {
     position: 'absolute',
     top: 60,
-    right: 20,
+    left: 20,
     zIndex: 1001,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
     borderRadius: 20,
@@ -1051,8 +1082,8 @@ const styles = StyleSheet.create({
   infoBannerTop: {
     position: 'absolute',
     top: 60,
-    left: 16,
-    right: 80,
+    left: 80,
+    right: 16,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(0, 0, 0, 0.7)',
@@ -1140,5 +1171,29 @@ legendButton: {
     fontSize: 13,
     color: 'rgba(255, 255, 255, 0.9)',
     flex: 1,
+  },
+  modalSearchButton: {
+    position: 'absolute',
+    top: 60,
+    left: 16,
+    zIndex: 1001,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 20,
+    width: 36,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalCloseButton: {
+    position: 'absolute',
+    top: 60,
+    right: 16,
+    zIndex: 1001,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 20,
+    width: 36,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });

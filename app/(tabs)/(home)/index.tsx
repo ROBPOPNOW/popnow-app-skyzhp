@@ -24,6 +24,8 @@ import { colors } from '@/styles/commonStyles';
 import { IconSymbol } from '@/components/IconSymbol';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+const TAB_BAR_HEIGHT = 50; // compact tab bar height
+const VIDEO_HEIGHT = SCREEN_HEIGHT - TAB_BAR_HEIGHT;
 
 export default function HomeScreen() {
   const [videos, setVideos] = useState<VideoPost[]>([]);
@@ -280,75 +282,13 @@ export default function HomeScreen() {
     }, [])
   );
 
-  const handleLike = async (videoId: string) => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        Alert.alert('Error', 'You must be logged in to like videos');
-        return;
-      }
-
-      const video = videos.find(v => v.id === videoId);
-      if (!video) return;
-
-      const currentIsLiked = video.isLiked;
-
-      if (currentIsLiked) {
-        const { error } = await supabase
-          .from('likes')
-          .delete()
-          .eq('video_id', videoId)
-          .eq('user_id', user.id);
-
-        if (error) {
-          console.error('❌ Error removing like:', error);
-          Alert.alert('Error', 'Failed to unlike video');
-          return;
-        }
-
-        setVideos(videos.map(v =>
-          v.id === videoId
-            ? {
-                ...v,
-                likes: Math.max(0, (v.likes || 0) - 1),
-                likes_count: Math.max(0, (v.likes_count || 0) - 1),
-                isLiked: false,
-              }
-            : v
-        ));
-      } else {
-        const { error } = await supabase
-          .from('likes')
-          .insert({ video_id: videoId, user_id: user.id });
-
-        if (error) {
-          if (error.code === '23505') {
-            setVideos(videos.map(v =>
-              v.id === videoId ? { ...v, isLiked: true } : v
-            ));
-            return;
-          }
-          console.error('❌ Error adding like:', error);
-          Alert.alert('Error', 'Failed to like video');
-          return;
-        }
-
-        setVideos(videos.map(v =>
-          v.id === videoId
-            ? {
-                ...v,
-                likes: (v.likes || 0) + 1,
-                likes_count: (v.likes_count || 0) + 1,
-                isLiked: true,
-              }
-            : v
-        ));
-      }
-    } catch (error) {
-      console.error('❌ Error in handleLike:', error);
-      Alert.alert('Error', 'Failed to update like');
-    }
-  };
+  const handleLike = useCallback((videoId: string, newIsLiked: boolean, newLikesCount: number) => {
+    setVideos(prev => prev.map(v =>
+      v.id === videoId
+        ? { ...v, isLiked: newIsLiked, likes_count: newLikesCount, likes: newLikesCount }
+        : v
+    ));
+  }, []);
 
   const trackView = async (videoId: string) => {
     try {
@@ -403,42 +343,23 @@ export default function HomeScreen() {
     flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
   };
 
-  const getRandomPointInRadius = (lat: number, lon: number, radiusKm: number) => {
-    const radiusInDegrees = radiusKm / 111.32;
-    const angle = Math.random() * 2 * Math.PI;
-    const distance = Math.random() * radiusInDegrees;
-    const newLat = lat + (distance * Math.cos(angle));
-    const newLon = lon + (distance * Math.sin(angle)) / Math.cos(lat * Math.PI / 180);
-    return { latitude: newLat, longitude: newLon };
-  };
-
-  const renderItem = ({ item, index }: { item: VideoPost; index: number }) => {
+  const renderItem = useCallback(({ item, index }: { item: VideoPost; index: number }) => {
     const isActive = isFocused && index === activeIndex;
     return (
       <VideoFeedItem
         video={item}
         isActive={isActive}
-        onLike={() => {}}
+        onLike={handleLike}
         onViewChange={handleViewChange}
         userLocation={userLocation}
         onLocationPress={(actualLat, actualLng, locationName) => {
-          let displayLat = actualLat;
-          let displayLng = actualLng;
-          const privacyRadius = item.locationPrivacy || 'exact';
-          if (privacyRadius === '3km') {
-            const randomPoint = getRandomPointInRadius(actualLat, actualLng, 3);
-            displayLat = randomPoint.latitude;
-            displayLng = randomPoint.longitude;
-          } else if (privacyRadius === '10km') {
-            const randomPoint = getRandomPointInRadius(actualLat, actualLng, 10);
-            displayLat = randomPoint.latitude;
-            displayLng = randomPoint.longitude;
-          }
+          // Pass only the video ID. The map looks the video up by ID, reads its
+          // true coords from its own query, and applies the privacy offset
+          // itself. We deliberately DON'T send coordinates, so true locations
+          // never travel through navigation params at all.
           router.push({
             pathname: '/(tabs)/map',
             params: {
-              centerLat: displayLat.toString(),
-              centerLng: displayLng.toString(),
               videoId: item.id,
               fromFeed: 'true',
             },
@@ -446,7 +367,7 @@ export default function HomeScreen() {
         }}
       />
     );
-  };
+  }, [activeIndex, isFocused, userLocation]);
 
   const onViewableItemsChanged = useRef(
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
@@ -478,6 +399,17 @@ export default function HomeScreen() {
   if (videos.length === 0) {
     return (
       <SafeAreaView style={styles.container}>
+        <Pressable
+          style={styles.searchButton}
+          onPress={() => router.push('/(tabs)/search')}
+        >
+          <IconSymbol
+            ios_icon_name="magnifyingglass"
+            android_material_icon_name="search"
+            size={24}
+            color="white"
+          />
+        </Pressable>
         <View style={styles.emptyContainer}>
           <IconSymbol
             ios_icon_name="video.fill"
@@ -521,7 +453,7 @@ export default function HomeScreen() {
           keyExtractor={(item) => item.id}
           pagingEnabled
           showsVerticalScrollIndicator={false}
-          snapToInterval={SCREEN_HEIGHT}
+          snapToInterval={VIDEO_HEIGHT}
           snapToAlignment="start"
           decelerationRate="fast"
           onViewableItemsChanged={onViewableItemsChanged}
@@ -552,13 +484,13 @@ export default function HomeScreen() {
               </View>
             ) : null
           }
-          removeClippedSubviews={false}
-          maxToRenderPerBatch={3}
-          windowSize={5}
-          initialNumToRender={2}
+          removeClippedSubviews={true}
+maxToRenderPerBatch={1}
+windowSize={2}
+initialNumToRender={1}
           getItemLayout={(data, index) => ({
-            length: SCREEN_HEIGHT,
-            offset: SCREEN_HEIGHT * index,
+            length: VIDEO_HEIGHT,
+            offset: VIDEO_HEIGHT * index,
             index,
           })}
         />
@@ -634,7 +566,7 @@ const styles = StyleSheet.create({
   searchButton: {
     position: 'absolute',
     top: 60,
-    right: 20,
+    left: 20,
     width: 50,
     height: 50,
     borderRadius: 25,
@@ -644,7 +576,7 @@ const styles = StyleSheet.create({
     zIndex: 100,
   },
   loadingMore: {
-    height: SCREEN_HEIGHT,
+    height: VIDEO_HEIGHT,
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: colors.background,

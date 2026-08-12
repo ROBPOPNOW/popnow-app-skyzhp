@@ -1,5 +1,13 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { View, StyleSheet, ActivityIndicator, Text, Pressable } from 'react-native';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import {
+  View,
+  StyleSheet,
+  ActivityIndicator,
+  Text,
+  Pressable,
+  Animated,
+  GestureResponderEvent,
+} from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { getVideoPlaybackUrl } from '@/utils/bunnynet';
 import { colors } from '@/styles/commonStyles';
@@ -7,44 +15,62 @@ import { colors } from '@/styles/commonStyles';
 interface VideoPlayerProps {
   videoUrl: string | undefined | null;
   isActive: boolean;
-  libraryId?: number; // 🆕 Which Bunny library (517995=Free, 518142=Premium)
+  libraryId?: number;
+  is2x?: boolean;
   onLoad?: () => void;
   onError?: (error: string) => void;
 }
 
-export default function VideoPlayer({ videoUrl, isActive, libraryId, onLoad, onError }: VideoPlayerProps) {
+const TAB_BAR_HEIGHT = 50;
+const BAR_HEIGHT_NORMAL = 3;
+const BAR_HEIGHT_SEEKING = 20;
+const PROGRESS_BAR_PADDING = 16;
+
+export default function VideoPlayer({ videoUrl, isActive, libraryId, is2x = false, onLoad, onError }: VideoPlayerProps) {
   const [loading, setLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
-  const [isTouching, setIsTouching] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [seekTime, setSeekTime] = useState(0);
+  const [handlePosition, setHandlePosition] = useState(0);
+
   const isActiveRef = useRef(isActive);
   const mountedRef = useRef(true);
+  const barWidth = useRef(0);
+  const barPageX = useRef(0);
+  const barAnimHeight = useRef(new Animated.Value(BAR_HEIGHT_NORMAL)).current;
+  const isSeekingRef = useRef(false);
+  const hasLoadedRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
+    return () => { mountedRef.current = false; };
   }, []);
 
-  // Update ref when isActive changes
   useEffect(() => {
     isActiveRef.current = isActive;
   }, [isActive]);
 
- // Generate playback URL from video GUID
+  useEffect(() => {
+    if (!isActive) {
+      setIsPaused(false);
+      setCurrentTime(0);
+    }
+  }, [isActive]);
+
+  useEffect(() => {
+    hasLoadedRef.current = false;
+  }, [playbackUrl]);
+
+  // Generate playback URL
   useEffect(() => {
     if (!mountedRef.current) return;
-    console.log('VideoPlayer received videoUrl:', videoUrl);
-    console.log('VideoPlayer received libraryId:', libraryId);
 
-    if (!videoUrl ||
-        videoUrl === '' ||
-        videoUrl === 'undefined' ||
-        videoUrl === 'null' ||
-        typeof videoUrl !== 'string') {
-      console.error('Invalid video URL:', videoUrl);
+    if (!videoUrl || videoUrl === '' || videoUrl === 'undefined' || videoUrl === 'null' || typeof videoUrl !== 'string') {
       if (mountedRef.current) setHasError(true);
       if (mountedRef.current) setErrorMessage('Invalid video URL');
       if (mountedRef.current) setLoading(false);
@@ -54,7 +80,6 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, onLoad, onE
 
     const url = getPlaybackUrlFromVideo(videoUrl, libraryId);
     if (!url) {
-      console.log('Waiting for CDN config to load...');
       if (mountedRef.current) setPlaybackUrl(null);
       if (mountedRef.current) setHasError(false);
       if (mountedRef.current) setLoading(true);
@@ -63,13 +88,11 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, onLoad, onE
         if (!mountedRef.current) return;
         const retryUrl = getPlaybackUrlFromVideo(videoUrl, libraryId);
         if (!retryUrl) {
-          console.error('Failed to generate playback URL after retry:', videoUrl);
           if (mountedRef.current) setHasError(true);
           if (mountedRef.current) setErrorMessage('CDN configuration not loaded');
           if (mountedRef.current) setLoading(false);
           if (onError) onError('CDN configuration not loaded');
         } else {
-          console.log('Generated playback URL after retry:', retryUrl);
           if (mountedRef.current) setPlaybackUrl(retryUrl);
           if (mountedRef.current) setHasError(false);
           if (mountedRef.current) setLoading(true);
@@ -79,189 +102,227 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, onLoad, onE
       return () => clearTimeout(retryTimer);
     }
 
-    console.log('Generated playback URL:', url);
     if (mountedRef.current) setPlaybackUrl(url);
     if (mountedRef.current) setHasError(false);
     if (mountedRef.current) setLoading(true);
   }, [videoUrl, libraryId]);
 
   const getPlaybackUrlFromVideo = (url: string | undefined | null, libId?: number): string | null => {
-    // Validate input
-    if (!url || 
-        typeof url !== 'string' || 
-        url === 'undefined' || 
-        url === 'null' || 
-        url.trim() === '') {
-      console.error('Invalid URL provided to getPlaybackUrlFromVideo:', url);
-      return null;
-    }
-
-    // If it's already a full URL, return it
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      console.log('URL is already a full URL:', url);
-      return url;
-    }
-    
-    // Otherwise, treat it as a video GUID and generate the playback URL
-    console.log('Treating as video GUID, generating playback URL for:', url);
-    console.log('Using library ID:', libId || 'default (Free)');
-    
+    if (!url || typeof url !== 'string' || url === 'undefined' || url === 'null' || url.trim() === '') return null;
+    if (url.startsWith('http://') || url.startsWith('https://')) return url;
     const playbackUrl = getVideoPlaybackUrl(url, libId);
-    if (!playbackUrl) {
-      console.error('Failed to generate playback URL from GUID:', url);
-      return null;
-    }
-    
-    console.log('🎬 Generated playback URL:', playbackUrl);
-    console.log('  - Library:', libId === 518142 ? 'Premium' : 'Free');
-    return playbackUrl;
+    return playbackUrl || null;
   };
 
-  // Create video player with expo-video
   const player = useVideoPlayer(playbackUrl, (player) => {
     if (playbackUrl) {
       player.loop = true;
       player.muted = false;
       player.volume = 1.0;
+      player.bufferOptions = {
+        minBufferForPlayback: 2,
+        preferredForwardBufferDuration: 10,
+      };
     }
   });
 
- // Control playback based on isActive prop
+  // Track current time for progress bar
+  useEffect(() => {
+    if (!player || !isActive || !playbackUrl) return;
+
+    const interval = setInterval(() => {
+      if (!mountedRef.current || isSeekingRef.current) return;
+      try {
+        const time = player.currentTime || 0;
+        const dur = player.duration || 0;
+        if (mountedRef.current) {
+          setCurrentTime(time);
+          if (dur > 0) setDuration(dur);
+        }
+      } catch (e) {}
+    }, 250);
+
+    return () => clearInterval(interval);
+  }, [player, isActive, playbackUrl]);
+
+  // Control playback based on isActive
   useEffect(() => {
     if (!playbackUrl || hasError || !player) return;
     if (typeof player.play !== 'function') return;
     if (!mountedRef.current) return;
 
-    console.log('isActive changed:', isActive, 'for video:', videoUrl);
-
     if (isActive) {
-      // Play video when active
-      console.log('Video becoming active, playing:', videoUrl);
       try {
         player.muted = false;
         player.volume = 1.0;
-        player.play();
-      } catch (error) {
-        console.error('Error playing video:', error);
-      }
+        if (!isPaused) player.play();
+      } catch (error) {}
     } else {
-      // COMPLETELY STOP video when not active
-      console.log('Video becoming inactive, STOPPING completely:', videoUrl);
       try {
-        // Stop playback and mute
         player.pause();
         player.muted = true;
         player.volume = 0;
-        // Reset to beginning
         player.currentTime = 0;
-      } catch (error) {
-        console.error('Error stopping video:', error);
-      }
+      } catch (error) {}
     }
-  }, [isActive, playbackUrl, hasError, player, videoUrl]);
+  }, [isActive, playbackUrl, hasError, player]);
 
- // Handle touch-and-hold for 2x speed
+  // 2x speed
   useEffect(() => {
-    if (!player || !isActive || !mountedRef.current) return;
+    if (!player || !isActive) return;
+    try { player.playbackRate = is2x ? 2.0 : 1.0; } catch (e) {}
+  }, [is2x, player, isActive]);
 
-    if (isTouching) {
-      // Speed up to 2x when touching
-      console.log('Touch detected - setting playback rate to 2x');
-      player.playbackRate = 2.0;
-    } else {
-      // Normal speed when not touching
-      console.log('Touch released - setting playback rate to 1x');
-      player.playbackRate = 1.0;
-    }
-  }, [isTouching, player, isActive]);
-
-// Cleanup on unmount
+  // Cleanup
   useEffect(() => {
     return () => {
-      console.log('VideoPlayer unmounting, cleaning up:', videoUrl);
       try {
         if (player && typeof player.pause === 'function') {
           player.pause();
           player.muted = true;
           player.volume = 0;
         }
-      } catch (error) {
-        console.log('Cleanup error (expected):', error);
-      }
+      } catch (error) {}
     };
-  }, []); // ← Empty deps - cleanup runs once on unmount only
+  }, []);
+
+  // Tap to pause/resume
+  const handleTap = useCallback(() => {
+    if (!player || !isActive || !playbackUrl || isSeekingRef.current) return;
+    try {
+      if (isPaused) {
+        player.play();
+        setIsPaused(false);
+      } else {
+        player.pause();
+        setIsPaused(true);
+      }
+    } catch (e) {}
+  }, [player, isActive, isPaused, playbackUrl]);
+
+  // Format time as M:SS
+  const formatTime = (seconds: number): string => {
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
+  // Expand bar animation
+  const expandBar = () => {
+    Animated.spring(barAnimHeight, {
+      toValue: BAR_HEIGHT_SEEKING,
+      useNativeDriver: false,
+      speed: 40,
+      bounciness: 0,
+    }).start();
+  };
+
+  // Shrink bar animation
+  const shrinkBar = () => {
+    Animated.spring(barAnimHeight, {
+      toValue: BAR_HEIGHT_NORMAL,
+      useNativeDriver: false,
+      speed: 40,
+      bounciness: 0,
+    }).start();
+  };
+
+  // Calculate seek position from pageX
+  const getSeekRatio = (pageX: number): number => {
+    const relX = pageX - barPageX.current;
+    return Math.max(0, Math.min(1, relX / barWidth.current));
+  };
+
+  // Progress bar touch handlers
+  const onProgressTouchStart = (evt: GestureResponderEvent) => {
+    if (!isActive || !duration) return;
+    isSeekingRef.current = true;
+    setIsSeeking(true);
+    expandBar();
+    try { player?.pause(); } catch (e) {}
+
+    const ratio = getSeekRatio(evt.nativeEvent.pageX);
+    const time = ratio * duration;
+    setSeekTime(time);
+    setHandlePosition(ratio);
+    try { if (player) player.currentTime = time; } catch (e) {}
+  };
+
+  const onProgressTouchMove = (evt: GestureResponderEvent) => {
+    if (!isSeekingRef.current || !duration) return;
+
+    const ratio = getSeekRatio(evt.nativeEvent.pageX);
+    const time = ratio * duration;
+    setSeekTime(time);
+    setHandlePosition(ratio);
+    setCurrentTime(time);
+    try { if (player) player.currentTime = time; } catch (e) {}
+  };
+
+  const onProgressTouchEnd = () => {
+    if (!isSeekingRef.current) return;
+    isSeekingRef.current = false;
+    setIsSeeking(false);
+    shrinkBar();
+    if (!isPaused) {
+      try { player?.play(); } catch (e) {}
+    }
+  };
+
+  const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
+  const displayTime = isSeeking ? seekTime : currentTime;
+  const displayProgress = isSeeking ? handlePosition : progress;
+
 
   const handleLoad = () => {
-    console.log('Video loaded successfully:', videoUrl);
+    if (hasLoadedRef.current) return;
+    hasLoadedRef.current = true;
     setLoading(false);
     setHasError(false);
-    if (onLoad) {
-      onLoad();
-    }
+    if (onLoad) onLoad();
   };
 
   const handleError = (error: any) => {
-    console.error('Video playback error:', error);
     setLoading(false);
     setHasError(true);
-
     let errorMsg = 'Failed to load video';
-    
-    // Check if it's a 403 error
     if (error?.error?.code === -1102 || error?.error?.domain === 'NSURLErrorDomain') {
       errorMsg = 'Video access denied (403)';
-      console.error('🚨 403 Error detected! Check Bunny.net Stream security settings.');
     }
-
     setErrorMessage(errorMsg);
-    
-    if (onError) {
-      onError(errorMsg);
-    }
+    if (onError) onError(errorMsg);
   };
 
   const handleManualRetry = () => {
-    console.log('Manual retry triggered');
     setHasError(false);
     setLoading(true);
-    
-    // Force reload by updating the playback URL
     if (videoUrl) {
       const url = getPlaybackUrlFromVideo(videoUrl, libraryId);
-      if (url) {
-        setPlaybackUrl(url + `?retry=${Date.now()}`);
-      }
+      if (url) setPlaybackUrl(url + `?retry=${Date.now()}`);
     }
   };
 
-  if (!videoUrl || 
-      videoUrl === '' || 
-      videoUrl === 'undefined' || 
-      videoUrl === 'null' ||
-      typeof videoUrl !== 'string') {
+  if (!videoUrl || videoUrl === '' || videoUrl === 'undefined' || videoUrl === 'null' || typeof videoUrl !== 'string') {
     return (
       <View style={styles.container}>
         <View style={styles.errorContainer}>
           <Text style={styles.errorText}>❌</Text>
           <Text style={styles.errorMessage}>Invalid video URL</Text>
-          <Text style={styles.errorDetails}>
-            The video URL is missing or invalid
-          </Text>
         </View>
       </View>
     );
   }
 
   if (!playbackUrl) {
-  return (
-    <View style={styles.container}>
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#FFFFFF" />
-        <Text style={styles.loadingText}>Preparing video...</Text>
+    return (
+      <View style={styles.container}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#FFFFFF" />
+          <Text style={styles.loadingText}>Preparing video...</Text>
+        </View>
       </View>
-    </View>
-  );
-}
+    );
+  }
 
   if (hasError) {
     return (
@@ -271,17 +332,11 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, onLoad, onE
           <Text style={styles.errorMessage}>{errorMessage}</Text>
           {errorMessage.includes('403') || errorMessage.includes('blocked') ? (
             <>
-              <Text style={styles.errorDetails}>
-                This video is blocked by security settings
-              </Text>
-              <Text style={styles.errorFix}>
-                Fix: Disable Token Authentication in Bunny.net Stream settings
-              </Text>
+              <Text style={styles.errorDetails}>This video is blocked by security settings</Text>
+              <Text style={styles.errorFix}>Fix: Disable Token Authentication in Bunny.net Stream settings</Text>
             </>
           ) : (
-            <Text style={styles.errorDetails}>
-              Check your internet connection
-            </Text>
+            <Text style={styles.errorDetails}>Check your internet connection</Text>
           )}
           <Pressable style={styles.retryButton} onPress={handleManualRetry}>
             <Text style={styles.retryButtonText}>Retry</Text>
@@ -293,12 +348,8 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, onLoad, onE
 
   return (
     <View style={styles.container}>
-      {/* NEW: Touch overlay for speed control */}
-      <Pressable
-        style={StyleSheet.absoluteFill}
-        onPressIn={() => setIsTouching(true)}
-        onPressOut={() => setIsTouching(false)}
-      >
+      {/* Video */}
+      <View style={StyleSheet.absoluteFill}>
         <VideoView
           player={player}
           style={styles.video}
@@ -306,17 +357,89 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, onLoad, onE
           nativeControls={false}
           onFirstFrameRender={handleLoad}
         />
-      </Pressable>
+      </View>
+
+      {/* Tap to pause — excludes bottom area where progress bar lives */}
+      <Pressable
+        style={styles.tapArea}
+        onPress={handleTap}
+      />
+
+      {/* Pause dim overlay */}
+      {isPaused && isActive && (
+        <View style={styles.pauseDimOverlay} pointerEvents="none" />
+      )}
+
+      {/* Loading */}
       {loading && (
-        <View style={styles.loadingContainer}>
+        <View style={styles.loadingContainer} pointerEvents="none">
           <ActivityIndicator size="large" color="#FFFFFF" />
           <Text style={styles.loadingText}>Loading video...</Text>
         </View>
       )}
-      {/* NEW: Speed indicator when touching */}
-      {isTouching && isActive && (
-        <View style={styles.speedIndicator}>
+
+      {/* 2x speed indicator */}
+      {is2x && isActive && (
+        <View style={styles.speedIndicator} pointerEvents="none">
           <Text style={styles.speedIndicatorText}>2x</Text>
+        </View>
+      )}
+
+      {/* Progress bar — full width, above tab bar */}
+      {isActive && !loading && (
+        <View
+          style={styles.progressBarOuter}
+          onLayout={(e) => {
+            barWidth.current = e.nativeEvent.layout.width - PROGRESS_BAR_PADDING * 2;
+          }}
+          ref={(ref) => {
+            if (ref) {
+              ref.measure((_x, _y, _w, _h, pageX) => {
+                barPageX.current = pageX + PROGRESS_BAR_PADDING;
+              });
+            }
+          }}
+          onStartShouldSetResponder={() => true}
+          onMoveShouldSetResponder={() => true}
+          onResponderGrant={onProgressTouchStart}
+          onResponderMove={onProgressTouchMove}
+          onResponderRelease={onProgressTouchEnd}
+          onResponderTerminate={onProgressTouchEnd}
+        >
+          {/* Time label — shows when seeking */}
+          {isSeeking && (
+            <View
+              style={[
+                styles.timeLabel,
+                { left: PROGRESS_BAR_PADDING + displayProgress * barWidth.current - 28 }
+              ]}
+              pointerEvents="none"
+            >
+              <Text style={styles.timeLabelText}>
+                {formatTime(displayTime)} / {formatTime(duration)}
+              </Text>
+            </View>
+          )}
+
+          {/* Track */}
+          <Animated.View style={[styles.progressTrack, { height: barAnimHeight }]}>
+            {/* Fill */}
+            <View
+              style={[
+                styles.progressFill,
+                { width: `${displayProgress * 100}%` }
+              ]}
+            />
+            {/* Handle — only visible when seeking */}
+            {isSeeking && (
+              <View
+                style={[
+                  styles.progressHandle,
+                  { left: `${displayProgress * 100}%` }
+                ]}
+              />
+            )}
+          </Animated.View>
         </View>
       )}
     </View>
@@ -330,6 +453,20 @@ const styles = StyleSheet.create({
   },
   video: {
     flex: 1,
+  },
+  tapArea: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: TAB_BAR_HEIGHT + 40,
+    zIndex: 5,
+  },
+  pauseDimOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    zIndex: 4,
+    bottom: TAB_BAR_HEIGHT + 40,
   },
   loadingContainer: {
     ...StyleSheet.absoluteFillObject,
@@ -396,10 +533,63 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 2,
     borderColor: colors.primary,
+    zIndex: 10,
   },
   speedIndicatorText: {
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
+  },
+  progressBarOuter: {
+    position: 'absolute',
+    bottom: TAB_BAR_HEIGHT + 26,
+    left: 0,
+    right: 0,
+    paddingHorizontal: PROGRESS_BAR_PADDING,
+    paddingVertical: 16,
+    zIndex: 200,
+    justifyContent: 'flex-end',
+  },
+  progressTrack: {
+    width: '100%',
+    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    borderRadius: 10,
+    overflow: 'visible',
+    justifyContent: 'center',
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 10,
+  },
+  progressHandle: {
+    position: 'absolute',
+    top: '50%',
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#FFFFFF',
+    marginTop: -9,
+    marginLeft: -9,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  timeLabel: {
+    position: 'absolute',
+    top: -32,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    minWidth: 56,
+  },
+  timeLabelText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
   },
 });

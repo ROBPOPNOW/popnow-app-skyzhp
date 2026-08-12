@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -33,8 +33,9 @@ export default function UserProfileScreen() {
   const [isFollowing, setIsFollowing] = useState(false);
   const [isBlocked, setIsBlocked] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [videoModalVisible, setVideoModalVisible] = useState(false);
+const [videoModalVisible, setVideoModalVisible] = useState(false);
   const [selectedVideoIndex, setSelectedVideoIndex] = useState(0);
+  const [avatarModalVisible, setAvatarModalVisible] = useState(false);
 
   // Profile data
   const [profile, setProfile] = useState({
@@ -124,10 +125,10 @@ export default function UserProfileScreen() {
 });
 
       const oneHourAgo = new Date();
-      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+      oneHourAgo.setHours(oneHourAgo.getHours() - 24);
       const oneHourAgoISO = oneHourAgo.toISOString();
 
-      console.log('📺 Loading live videos only (within 1 hour)');
+      console.log('📺 Loading live videos only (within 24 hours)');
       console.log('Cutoff time:', oneHourAgoISO);
 
       const { data: videosData, error: videosError } = await supabase
@@ -307,83 +308,13 @@ export default function UserProfileScreen() {
     }
   };
 
-  const handleLike = async (videoId: string) => {
-    console.log('🎯 USER PROFILE: LIKE HANDLER');
-    console.log('  Video ID:', videoId);
-    
-    try {
-      const {
-        data: { user: currentUser },
-      } = await supabase.auth.getUser();
-      if (!currentUser) return;
-
-      const video = videoFeedData.find(v => v.id === videoId);
-      if (!video) return;
-
-      const currentIsLiked = video.isLiked;
-
-      if (currentIsLiked) {
-        console.log('➖ Removing like...');
-        const { error } = await supabase
-          .from('likes')
-          .delete()
-          .eq('video_id', videoId)
-          .eq('user_id', currentUser.id);
-
-        if (error) {
-          console.error('❌ Error removing like:', error);
-          return;
-        }
-
-        console.log('✅ Like removed - trigger will update count');
-
-        setVideoFeedData(prevVideos => prevVideos.map(v =>
-          v.id === videoId
-            ? {
-                ...v,
-                likes: Math.max(0, v.likes - 1),
-                likes_count: Math.max(0, (v.likes_count || 0) - 1),
-                isLiked: false
-              }
-            : v
-        ));
-      } else {
-        console.log('➕ Adding like...');
-        const { error } = await supabase
-          .from('likes')
-          .insert({ video_id: videoId, user_id: currentUser.id });
-
-        if (error) {
-          if (error.code === '23505') {
-            console.log('ℹ️ Already liked (duplicate ignored)');
-            setVideoFeedData(prevVideos => prevVideos.map(v =>
-              v.id === videoId ? { ...v, isLiked: true } : v
-            ));
-            return;
-          }
-          console.error('❌ Error adding like:', error);
-          return;
-        }
-
-        console.log('✅ Like added - trigger will update count');
-
-        setVideoFeedData(prevVideos => prevVideos.map(v =>
-          v.id === videoId
-            ? {
-                ...v,
-                likes: v.likes + 1,
-                likes_count: (v.likes_count || 0) + 1,
-                isLiked: true
-              }
-            : v
-        ));
-      }
-
-      console.log('✅ USER PROFILE: LIKE COMPLETE');
-    } catch (error) {
-      console.error('❌ Error in handleLike:', error);
-    }
-  };
+  const handleLike = useCallback((videoId: string, newIsLiked: boolean, newLikesCount: number) => {
+    setVideoFeedData(prev => prev.map(v =>
+      v.id === videoId
+        ? { ...v, isLiked: newIsLiked, likes_count: newLikesCount, likes: newLikesCount }
+        : v
+    ));
+  }, []);
 
   const handleViewChange = (videoId: string) => {
     console.log('Video viewed in user profile:', videoId);
@@ -429,13 +360,13 @@ export default function UserProfileScreen() {
         </View>
 
         <View style={styles.profileInfo}>
-          <View style={styles.avatarContainer}>
+         <Pressable style={styles.avatarContainer} onPress={() => profile.avatarUrl && setAvatarModalVisible(true)}>
             <PremiumAvatar
               avatarUrl={profile.avatarUrl}
               size={80}
               isPremium={profile.isPremium}
             />
-          </View>
+          </Pressable>
 
           <View style={styles.statsContainer}>
             {/* Videos */}
@@ -615,6 +546,27 @@ export default function UserProfileScreen() {
               initialNumToRender={1}
             />
           </SafeAreaView>
+        </View>
+      )}
+    {/* Fullscreen Avatar Modal */}
+      {avatarModalVisible && (
+        <View style={styles.avatarModalContainer}>
+          <Pressable
+            style={styles.avatarModalClose}
+            onPress={() => setAvatarModalVisible(false)}
+          >
+            <IconSymbol
+              ios_icon_name="xmark.circle.fill"
+              android_material_icon_name="cancel"
+              size={36}
+              color="#FFFFFF"
+            />
+          </Pressable>
+          <Image
+            source={{ uri: profile.avatarUrl }}
+            style={styles.avatarModalImage}
+            resizeMode="contain"
+          />
         </View>
       )}
     </SafeAreaView>
@@ -821,5 +773,27 @@ const styles = StyleSheet.create({
   videoItemContainer: {
     width: SCREEN_WIDTH,
     height: SCREEN_HEIGHT,
+  },
+  avatarModalContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.95)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 2000,
+  },
+  avatarModalClose: {
+    position: 'absolute',
+    top: 60,
+    right: 20,
+    zIndex: 2001,
+  },
+  avatarModalImage: {
+    width: SCREEN_WIDTH,
+    height: SCREEN_WIDTH,
+    borderRadius: 12,
   },
 });

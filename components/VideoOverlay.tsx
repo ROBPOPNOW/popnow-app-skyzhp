@@ -46,9 +46,9 @@ export default function VideoOverlay({
       const diffMs = now.getTime() - createdAt.getTime();
       const diffMins = Math.floor(diffMs / 60000);
       const diffHours = Math.floor(diffMs / 3600000);
-      const minutesLeft = 60 - diffMins;
+      const minutesLeft = (24 * 60) - diffMins;
 
-      if (minutesLeft <= 10 && minutesLeft > 0) {
+      if (minutesLeft <= 60 && minutesLeft > 0) {
         if (mounted) setTimeInfo({
           displayText: `${minutesLeft} min${minutesLeft === 1 ? '' : 's'} left`,
           minutesLeft,
@@ -373,13 +373,13 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    height: 450,
+    height: 0,
     zIndex: 101,
   },
   rightActions: {
     position: 'absolute',
     right: 12,
-    bottom: 260,
+    bottom: 240,
     gap: 24,
     zIndex: 102,
   },
@@ -398,7 +398,7 @@ const styles = StyleSheet.create({
   },
   bottomInfo: {
     position: 'absolute',
-    bottom: 240,
+    bottom: 130,
     left: 16,
     right: 80,
     zIndex: 102,

@@ -20,6 +20,7 @@ interface LeafletMapProps {
   zoom?: number;
   onMarkerPress?: (markerId: string, videoIds: string[]) => void;
   onLocateMePress?: () => void;
+  hideControls?: boolean;
   onDoubleTap?: (location: { latitude: number; longitude: number }) => void;
   showHeatmap?: boolean;
   heatmapData?: Array<{ latitude: number; longitude: number; intensity: number }>;
@@ -36,6 +37,7 @@ function LeafletMap({
   zoom = 12,
   onMarkerPress,
   onLocateMePress,
+  hideControls = false,
   onDoubleTap,
   showHeatmap = false,
   heatmapData = [],
@@ -157,6 +159,28 @@ useEffect(() => {
       true;
     `);
   }, [heatmapData, showHeatmap, isMapReady]);
+
+// 🔔 Handle zoom changes from notification
+useEffect(() => {
+  if (!isMapReady || !webViewRef.current) return;
+  if (zoom === initialZoom.current) return; // skip if same as initial
+  
+  webViewRef.current.injectJavaScript(`
+    (function() {
+      try {
+        if (${zoom} <= 3) {
+          // World view — zoom out to see entire world
+          map.setView([20, 0], ${zoom}, { animate: true });
+        } else {
+          map.setZoom(${zoom}, { animate: true });
+        }
+      } catch(e) {
+        console.error('Error setting zoom:', e);
+      }
+    })();
+    true;
+  `);
+}, [zoom, isMapReady]);
 
   // Update user location
   useEffect(() => {
@@ -457,15 +481,19 @@ window.tileLayer = L.tileLayer('${initialTileUrl}', {
           }
         });
 
+        map.doubleClickZoom.disable();
+
         map.on('click', function(e) {
           var now = Date.now();
-          if (now - state.lastTap < 300 && now - state.lastTap > 0) {
+          if (now - state.lastTap < 350 && now - state.lastTap > 0) {
             window.ReactNativeWebView.postMessage(JSON.stringify({
               type: 'doubleTap',
               location: { latitude: e.latlng.lat, longitude: e.latlng.lng }
             }));
+            state.lastTap = 0;
+          } else {
+            state.lastTap = now;
           }
-          state.lastTap = now;
         });
 
         function getMarkerColorClass(r) {
@@ -619,39 +647,33 @@ window.tileLayer = L.tileLayer('${initialTileUrl}', {
         )}
       />
       
-      <Pressable 
-        style={[
-          styles.locateMeButton,
-          (!isGpsReady || locationDenied) && styles.locateMeButtonDisabled
-        ]} 
-        onPress={handleLocateMe}
-        disabled={!isGpsReady || locationDenied}
-      >
-        <View style={styles.locateMeButtonInner}>
-          {locationDenied ? (
-            <>
-              <Text style={styles.locateMeButtonTextDisabled}>📍</Text>
-              <Text style={styles.locateMeButtonLabelDisabled}>Location Disabled</Text>
-            </>
-          ) : !isGpsReady ? (
-            <>
-              <ActivityIndicator size="small" color={colors.textSecondary} />
-              <Text style={styles.locateMeButtonLabelDisabled}>Getting GPS...</Text>
-            </>
-          ) : (
-            <>
-              <Text style={styles.locateMeButtonText}>📍</Text>
-              <Text style={styles.locateMeButtonLabel}>Locate Me</Text>
-            </>
-          )}
-        </View>
-      </Pressable>
+      {!hideControls && (
+        <>
+          <Pressable
+            style={[
+              styles.locateMeButton,
+              (!isGpsReady || locationDenied) && styles.locateMeButtonDisabled
+            ]}
+            onPress={handleLocateMe}
+            disabled={!isGpsReady || locationDenied}
+          >
+            {!isGpsReady && !locationDenied ? (
+              <ActivityIndicator size="small" color="#FF1493" />
+            ) : (
+              <Text style={[
+                styles.locateMeIcon,
+                locationDenied && styles.locateMeIconDisabled
+              ]}>➤</Text>
+            )}
+          </Pressable>
 
-      {zoomIndicator && (
-        <View style={styles.zoomIndicator}>
-          <Text style={styles.zoomIndicatorText}>{zoomIndicator.text}</Text>
-          <Text style={styles.zoomIndicatorSubtext}>{zoomIndicator.subtext}</Text>
-        </View>
+          {zoomIndicator && (
+            <View style={styles.zoomIndicator}>
+              <Text style={styles.zoomIndicatorText}>{zoomIndicator.text}</Text>
+              <Text style={styles.zoomIndicatorSubtext}>{zoomIndicator.subtext}</Text>
+            </View>
+          )}
+        </>
       )}
     </View>
   );
@@ -667,33 +689,35 @@ const styles = StyleSheet.create({
     backgroundColor: '#F7F7F7',
   },
   loadingText: { marginTop: 12, fontSize: 14, color: colors.textSecondary },
-  locateMeButton: {
-  position: 'absolute',
-  bottom: 120,  // ← Move up a bit more
-  right: 20,
-  backgroundColor: 'rgba(255, 255, 255, 0.85)',  // ← Semi-transparent
-  borderRadius: 12,
-  shadowColor: '#000',
-  shadowOffset: { width: 0, height: 2 },
-  shadowOpacity: 0.25,
-  shadowRadius: 4,
-  elevation: 5,
-},
-  locateMeButtonDisabled: {
-    backgroundColor: '#E0E0E0',
-    opacity: 0.6,
-  },
-  locateMeButtonInner: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    flexDirection: 'row',
+locateMeButton: {
+    position: 'absolute',
+    bottom: 120,
+    right: 20,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#FFFFFF',
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+    elevation: 6,
+    zIndex: 1000,
   },
-  locateMeButtonText: { fontSize: 24 },
-  locateMeButtonTextDisabled: { fontSize: 24, opacity: 0.4 },
-  locateMeButtonLabel: { fontSize: 16, fontWeight: '600', color: '#212121' },
-  locateMeButtonLabelDisabled: { fontSize: 14, fontWeight: '600', color: colors.textSecondary },
+  locateMeButtonDisabled: {
+    opacity: 0.5,
+  },
+  locateMeIcon: {
+    fontSize: 20,
+    color: '#FF1493',
+    transform: [{ rotate: '-45deg' }],
+    lineHeight: 22,
+  },
+  locateMeIconDisabled: {
+    color: '#CCCCCC',
+  },
   zoomIndicator: {
     position: 'absolute',
     top: 20,
@@ -723,27 +747,22 @@ const styles = StyleSheet.create({
 export default React.memo(
   LeafletMap,
   (prevProps, nextProps) => {
-    // Always re-render when dark mode changes
-    if (prevProps.isDarkMode !== nextProps.isDarkMode) {
-      return false;
-    }
+    if (prevProps.isDarkMode !== nextProps.isDarkMode) return false;
+    if (prevProps.hideControls !== nextProps.hideControls) return false;
+    if (prevProps.isGpsReady !== nextProps.isGpsReady) return false;
+    if (prevProps.locationDenied !== nextProps.locationDenied) return false;
+    if (prevProps.zoom !== nextProps.zoom) return false;
 
     const prevMarkers = prevProps.markers || [];
     const nextMarkers = nextProps.markers || [];
 
-    if (prevMarkers.length !== nextMarkers.length) {
-      console.log('❌ Marker count changed - WILL RE-RENDER');
-      return false;
-    }
+    if (prevMarkers.length !== nextMarkers.length) return false;
 
     const prevIds = prevMarkers.map(m => m.id).sort().join(',');
     const nextIds = nextMarkers.map(m => m.id).sort().join(',');
 
-    if (prevIds !== nextIds) {
-      return false;
-    }
+    if (prevIds !== nextIds) return false;
 
-    console.log('✅ Props are equal - PREVENTING RE-RENDER');
     return true;
   }
 );

@@ -1,5 +1,5 @@
 import React from 'react';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, usePathname } from 'expo-router';
 import { IconSymbol } from '@/components/IconSymbol';
 import {
@@ -7,14 +7,10 @@ import {
   Text,
   TouchableOpacity,
   StyleSheet,
-  Dimensions,
-  Platform,
   Alert,
   Linking,
 } from 'react-native';
 import { colors } from '@/styles/commonStyles';
-import { LinearGradient } from 'expo-linear-gradient';
-import { BlurView } from 'expo-blur';
 import * as Location from 'expo-location';
 
 export interface TabBarItem {
@@ -28,38 +24,24 @@ export interface TabBarItem {
 interface FloatingTabBarProps {
   tabs: TabBarItem[];
   isTransparent?: boolean;
+  unreadCount?: number;
 }
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-
-export default function FloatingTabBar({ tabs, isTransparent = false }: FloatingTabBarProps) {
+export default function FloatingTabBar({ tabs, isTransparent = false, unreadCount = 0 }: FloatingTabBarProps) {
   const router = useRouter();
   const pathname = usePathname();
-  console.log('🎨 FloatingTabBar - isTransparent prop:', isTransparent);
-  console.log('🎨 FloatingTabBar - pathname:', pathname);
+  const insets = useSafeAreaInsets();
 
   const handleTabPress = (route: string, isCurrentTab: boolean) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🔘 Tab pressed:', route);
-    console.log('Current pathname:', pathname);
-    console.log('Is already on this tab:', isCurrentTab);
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-    if (isCurrentTab) {
-      console.log('✋ Already on this tab - ignoring tap to prevent re-opening');
-      return;
-    }
-
+    if (isCurrentTab) return;
     try {
-      console.log('✅ Navigating to:', route);
       router.push(route as any);
     } catch (error) {
-      console.error('❌ Navigation error:', error);
+      console.error('Navigation error:', error);
     }
   };
 
   const handleUploadPress = async (route: string) => {
-    // 📍 Check location permission before allowing recording
     const { status } = await Location.getForegroundPermissionsAsync();
     if (status !== 'granted') {
       Alert.alert(
@@ -80,18 +62,10 @@ export default function FloatingTabBar({ tabs, isTransparent = false }: Floating
       if (tab.route === '/(tabs)/(home)/') {
         return pathname === '/' || pathname.startsWith('/(tabs)/(home)') || pathname === '/(tabs)/(home)/';
       }
-      if (tab.route === '/(tabs)/search') {
-        return pathname.includes('/search');
-      }
-      if (tab.route === '/(tabs)/map') {
-        return pathname.includes('/map');
-      }
-      if (tab.route === '/(tabs)/request') {
-        return pathname.includes('/request');
-      }
-      if (tab.route === '/(tabs)/profile') {
-        return pathname.includes('/profile');
-      }
+      if (tab.route === '/(tabs)/search') return pathname.includes('/search');
+      if (tab.route === '/(tabs)/map') return pathname.includes('/map');
+      if (tab.route === '/(tabs)/request') return pathname.includes('/request');
+      if (tab.route === '/(tabs)/profile') return pathname.includes('/profile');
       return pathname.includes(tab.name);
     });
     return index >= 0 ? index : 0;
@@ -99,40 +73,13 @@ export default function FloatingTabBar({ tabs, isTransparent = false }: Floating
 
   const currentIndex = getCurrentIndex();
 
-  // Dynamic styles based on isTransparent
-  const containerStyle = [
-    styles.container,
-    isTransparent && styles.containerTransparent,
-  ];
-
-  const tabBarStyle = [
-    styles.tabBar,
-    isTransparent && styles.tabBarTransparent,
-  ];
-
-  const safeAreaStyle = [
-    styles.safeArea,
-    isTransparent && styles.safeAreaTransparent,
-  ];
-
   return (
-    <View style={containerStyle} pointerEvents="box-none">
-      {/* Blur + Gradient Background (only on Explore) */}
-      {isTransparent && (
-        <View style={styles.backgroundContainer}>
-          <BlurView
-            intensity={Platform.OS === 'ios' ? 30 : 50}
-            tint="dark"
-            style={styles.blurView}
-          />
-          <LinearGradient
-            colors={['transparent', 'rgba(0, 0, 0, 0.6)']}
-            style={styles.gradientOverlay}
-          />
-        </View>
-      )}
-
-      <View style={tabBarStyle} pointerEvents="box-none">
+    <View style={[
+      styles.container,
+      isTransparent && styles.containerTransparent,
+      { paddingBottom: insets.bottom },
+    ]}>
+      <View style={styles.tabBar}>
         {tabs.map((tab, index) => {
           const isActive = currentIndex === index;
           const isUpload = tab.isUpload;
@@ -141,25 +88,24 @@ export default function FloatingTabBar({ tabs, isTransparent = false }: Floating
             return (
               <TouchableOpacity
                 key={tab.name}
-                style={styles.uploadTab}
+                style={styles.tab}
                 onPress={() => handleUploadPress(tab.route)}
-                activeOpacity={0.8}
+                activeOpacity={0.7}
               >
-                <LinearGradient
-                  colors={[colors.primary, colors.secondary]}
-                  style={styles.uploadButton}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                >
+                <View style={styles.uploadButton}>
                   <IconSymbol
-                    name={tab.icon as any}
-                    size={28}
-                    color={colors.card}
+                    ios_icon_name="plus"
+                    android_material_icon_name="add"
+                    size={16}
+                    color="#FFFFFF"
                   />
-                </LinearGradient>
+                </View>
               </TouchableOpacity>
             );
           }
+
+          const isProfile = tab.name === 'profile';
+          const showBadge = isProfile && unreadCount > 0;
 
           return (
             <TouchableOpacity
@@ -168,42 +114,37 @@ export default function FloatingTabBar({ tabs, isTransparent = false }: Floating
               onPress={() => handleTabPress(tab.route, isActive)}
               activeOpacity={0.7}
             >
-              <View style={styles.tabContent}>
+              <View style={{ position: 'relative' }}>
                 <IconSymbol
-                  name={tab.icon as any}
-                  size={24}
-                  color={
-                    isTransparent
-                      ? isActive
-                        ? '#FFFFFF'
-                        : 'rgba(255, 255, 255, 0.6)'
-                      : isActive
-                      ? colors.primary
-                      : colors.text
+                  ios_icon_name={tab.icon}
+                  android_material_icon_name={
+                    tab.icon === 'binoculars.fill' ? 'travel-explore' :
+                    tab.icon === 'map.fill' ? 'map' :
+                    tab.icon === 'hand.raised.fill' ? 'pan-tool' :
+                    tab.icon === 'person.fill' ? 'person' :
+                    'help'
                   }
+                  size={20}
+                  color={isActive ? '#FFFFFF' : 'rgba(255,255,255,0.45)'}
                 />
-                <Text
-                  style={[
-                    styles.tabLabel,
-                    {
-                      color: isTransparent
-                        ? isActive
-                          ? '#FFFFFF'
-                          : 'rgba(255, 255, 255, 0.6)'
-                        : isActive
-                        ? colors.primary
-                        : colors.text,
-                    },
-                  ]}
-                >
-                  {tab.label}
-                </Text>
+                {showBadge && (
+                  <View style={styles.badge}>
+                    <Text style={styles.badgeText}>
+                      {unreadCount > 99 ? '99+' : unreadCount}
+                    </Text>
+                  </View>
+                )}
               </View>
+              <Text style={[
+                styles.tabLabel,
+                { color: isActive ? '#FFFFFF' : 'rgba(255,255,255,0.45)' },
+              ]}>
+                {tab.label}
+              </Text>
             </TouchableOpacity>
           );
         })}
       </View>
-      <SafeAreaView edges={['bottom']} style={safeAreaStyle} />
     </View>
   );
 }
@@ -214,86 +155,55 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: colors.card,
-    borderTopWidth: 1,
-    borderTopColor: colors.textSecondary + '20',
-    zIndex: 1000,
-    elevation: 10,
+    backgroundColor: '#000000',
+    zIndex: 9999,
+    elevation: 100,
   },
   containerTransparent: {
     backgroundColor: 'transparent',
-    borderTopWidth: 0,
-    borderTopColor: 'transparent',
-  },
-  backgroundContainer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    overflow: 'hidden',
-  },
-  blurView: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-  },
-  gradientOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
   },
   tabBar: {
     flexDirection: 'row',
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    backgroundColor: colors.card,
     alignItems: 'center',
-  },
-  tabBarTransparent: {
-    backgroundColor: 'transparent',
+    paddingTop: 6,
+    paddingBottom: 4,
+    paddingHorizontal: 4,
   },
   tab: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  uploadTab: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: -20,
+    gap: 2,
+    paddingVertical: 2,
   },
   uploadButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: 30,
+    height: 22,
+    borderRadius: 6,
+    backgroundColor: colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: '#FF6B6B',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 16,
-    elevation: 8,
-  },
-  tabContent: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-    paddingVertical: 4,
   },
   tabLabel: {
-    fontSize: 11,
-    fontWeight: '600',
+    fontSize: 9,
+    fontWeight: '500',
+    letterSpacing: 0.1,
   },
-  safeArea: {
-    backgroundColor: colors.card,
+  badge: {
+    position: 'absolute',
+    top: -4,
+    right: -8,
+    backgroundColor: '#F44336',
+    borderRadius: 10,
+    minWidth: 16,
+    height: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 3,
   },
-  safeAreaTransparent: {
-    backgroundColor: 'transparent',
+  badgeText: {
+    color: '#FFFFFF',
+    fontSize: 9,
+    fontWeight: 'bold',
   },
 });

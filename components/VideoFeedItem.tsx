@@ -1,7 +1,6 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { View, StyleSheet, Dimensions, Alert, Modal, TextInput, Pressable, Text, ScrollView, Image, KeyboardAvoidingView, Platform, ActivityIndicator, Animated, Share } from 'react-native';
-import { TapGestureHandler, State } from 'react-native-gesture-handler';
 import VideoPlayer from './VideoPlayer';
 import VideoOverlay from './VideoOverlay';
 import { VideoPost } from '@/types/video';
@@ -9,11 +8,12 @@ import { supabase } from '@/lib/supabase';
 import { colors } from '@/styles/commonStyles';
 import { IconSymbol } from '@/components/IconSymbol';
 import { PremiumAvatar } from '@/components/PremiumAvatar';
+import { TapGestureHandler, LongPressGestureHandler, State } from 'react-native-gesture-handler';
 
 interface VideoFeedItemProps {
   video: VideoPost;
   isActive: boolean;
-  onLike: (videoId: string) => void;
+  onLike: (videoId: string, newIsLiked: boolean, newLikesCount: number) => void;
   onViewChange?: (videoId: string) => void;
   userLocation?: { latitude: number; longitude: number } | null;
   onAvatarPress?: (userId: string) => void;
@@ -37,6 +37,8 @@ interface Comment {
 }
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+const TAB_BAR_HEIGHT = 50;
+const VIDEO_HEIGHT = SCREEN_HEIGHT - TAB_BAR_HEIGHT;
 
 export default function VideoFeedItem({ 
   video, 
@@ -65,6 +67,7 @@ export default function VideoFeedItem({
   const likeAnimationScale = useRef(new Animated.Value(0)).current;
   const likeAnimationOpacity = useRef(new Animated.Value(0)).current;
   const [localViewsCount, setLocalViewsCount] = useState(video.views_count || 0);
+  const [is2x, setIs2x] = useState(false);
 
 // Helper to get user data (handles both array and object)
 const getUser = (users: any) => {
@@ -235,6 +238,7 @@ const handleLike = async () => {
         if (likeError.code === '23505') {
           // Duplicate - just keep the UI updated
           console.log('ℹ️ Already liked (duplicate ignored)');
+          onLike(video.id, true, newLikesCount);
           return;
         }
         console.error('❌ Error adding like:', likeError);
@@ -244,6 +248,7 @@ const handleLike = async () => {
         return;
       }
       console.log('✅ Like added - trigger will update count');
+      onLike(video.id, newIsLiked, newLikesCount);
     } else {
       console.log('➖ Removing like from database...');
       const { error: unlikeError } = await supabase
@@ -260,8 +265,9 @@ const handleLike = async () => {
         return;
       }
       console.log('✅ Like removed - trigger will update count');
+      onLike(video.id, newIsLiked, newLikesCount);
     }
-    
+
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('✅ VIDEOFEEDITEM: LIKE COMPLETE');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -481,7 +487,7 @@ const handleShare = async () => {
     // Create share message
     // Calculate time remaining
     const createdAt = new Date(video.createdAt);
-    const expiresAt = new Date(createdAt.getTime() + 60 * 60 * 1000); // 1 hour after creation
+    const expiresAt = new Date(createdAt.getTime() + 24 * 60 * 60 * 1000); // 24 hours after creation
     const now = new Date();
     const msLeft = expiresAt.getTime() - now.getTime();
     const minsLeft = Math.max(0, Math.floor(msLeft / 60000));
@@ -579,7 +585,24 @@ const result = await Share.share({
 
   return (
     <View style={styles.container}>
-      <TapGestureHandler
+      <LongPressGestureHandler
+        minDurationMs={300}
+        onHandlerStateChange={({ nativeEvent }) => {
+          if (nativeEvent.state === State.ACTIVE) {
+            console.log('👆 Long press - 2x speed');
+            setIs2x(true);
+          } else if (
+            nativeEvent.state === State.END ||
+            nativeEvent.state === State.CANCELLED ||
+            nativeEvent.state === State.FAILED
+          ) {
+            console.log('👆 Long press ended - 1x speed');
+            setIs2x(false);
+          }
+        }}
+      >
+        <View style={StyleSheet.absoluteFill}>
+        <TapGestureHandler
         ref={doubleTapRef}
         onHandlerStateChange={handleDoubleTap}
         numberOfTaps={2}
@@ -590,6 +613,7 @@ const result = await Share.share({
     videoUrl={video.videoUrl || video.video_url}
     isActive={isActive}
     libraryId={video.library_id}
+    is2x={is2x}
     onLoad={() => console.log('Video loaded:', video.id)}
     onError={(error) => console.error('Video error:', error)}
   />
@@ -615,6 +639,8 @@ const result = await Share.share({
           </Animated.View>
         </View>
       </TapGestureHandler>
+        </View>
+      </LongPressGestureHandler>
       
 <VideoOverlay
   video={updatedVideo}
@@ -787,7 +813,7 @@ const result = await Share.share({
 const styles = StyleSheet.create({
   container: {
     width: '100%',
-    height: SCREEN_HEIGHT,
+    height: VIDEO_HEIGHT,
     position: 'relative',
     zIndex: 1,
   },

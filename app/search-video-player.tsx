@@ -16,9 +16,10 @@ import { supabase } from '@/lib/supabase';
 import { VideoPost } from '@/types/video';
 import VideoFeedItem from '@/components/VideoFeedItem';
 import * as Location from 'expo-location';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { colors } from '@/styles/commonStyles';
-import { Pressable } from 'react-native'; // ← Add Pressable to imports
+import { Pressable } from 'react-native';
+import { IconSymbol } from '@/components/IconSymbol';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -36,6 +37,15 @@ export default function SearchVideoPlayerScreen() {
     loadVideos();
     getUserLocation();
   }, []);
+  // ⏸️ Pause video when navigating away
+useFocusEffect(
+  useCallback(() => {
+    setActiveIndex(prev => prev);
+    return () => {
+      setActiveIndex(-1);
+    };
+  }, [])
+);
 
   const getUserLocation = async () => {
     try {
@@ -131,17 +141,17 @@ const { data, error } = await supabase
 }
 
 // Filter out expired videos (older than 1 hour) ONLY if they're not owned by current user
-const oneHourAgo = new Date();
-oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+const twentyFourHoursAgo = new Date();
+twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
 
 const filteredData = data.filter((video: any) => {
   const videoCreatedAt = new Date(video.created_at);
   const isOwnVideo = user && video.user_id === user.id;
-  const isExpired = videoCreatedAt < oneHourAgo;
+  const isExpired = videoCreatedAt < twentyFourHoursAgo;
 
   // Keep video if:
   // 1. It's the user's own video (even if expired to public)
-  // 2. OR it's not expired yet
+  // 2. OR it's not expired yet (within 24 hours)
   return isOwnVideo || !isExpired;
 });
 
@@ -221,82 +231,13 @@ const transformedVideos: VideoPost[] = filteredData.map((video: any) => ({
     }
   };
 
-  const handleLike = async (videoId: string) => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        Alert.alert('Error', 'You must be logged in to like videos');
-        return;
-      }
-
-      // Check if already liked
-      const { data: existingLike } = await supabase
-        .from('likes')
-        .select('id')
-        .eq('video_id', videoId)
-        .eq('user_id', user.id)
-        .single();
-
-      if (existingLike) {
-        // Unlike
-        await supabase
-          .from('likes')
-          .delete()
-          .eq('video_id', videoId)
-          .eq('user_id', user.id);
-
-        // Decrement likes count
-        const { data: currentVideo } = await supabase
-          .from('videos')
-          .select('likes_count')
-          .eq('id', videoId)
-          .single();
-
-        if (currentVideo) {
-          const newCount = Math.max(0, (currentVideo.likes_count || 0) - 1);
-          await supabase
-            .from('videos')
-            .update({ likes_count: newCount })
-            .eq('id', videoId);
-        }
-
-        setVideos(videos.map(v =>
-          v.id === videoId
-            ? { ...v, likes: Math.max(0, v.likes - 1), likes_count: Math.max(0, (v.likes_count || 0) - 1), isLiked: false }
-            : v
-        ));
-      } else {
-        // Like
-        await supabase
-          .from('likes')
-          .insert({ video_id: videoId, user_id: user.id });
-
-        // Increment likes count
-        const { data: currentVideo } = await supabase
-          .from('videos')
-          .select('likes_count')
-          .eq('id', videoId)
-          .single();
-
-        if (currentVideo) {
-          const newCount = (currentVideo.likes_count || 0) + 1;
-          await supabase
-            .from('videos')
-            .update({ likes_count: newCount })
-            .eq('id', videoId);
-        }
-
-        setVideos(videos.map(v =>
-          v.id === videoId
-            ? { ...v, likes: v.likes + 1, likes_count: (v.likes_count || 0) + 1, isLiked: true }
-            : v
-        ));
-      }
-    } catch (error) {
-      console.error('Error liking video:', error);
-      Alert.alert('Error', 'Failed to like video');
-    }
-  };
+  const handleLike = useCallback((videoId: string, newIsLiked: boolean, newLikesCount: number) => {
+    setVideos(prev => prev.map(v =>
+      v.id === videoId
+        ? { ...v, isLiked: newIsLiked, likes_count: newLikesCount, likes: newLikesCount }
+        : v
+    ));
+  }, []);
 
   const handleViewChange = useCallback((videoId: string) => {
     // Track view only once per video
@@ -368,17 +309,19 @@ const transformedVideos: VideoPost[] = filteredData.map((video: any) => ({
     params: { userId },
   });
 }}
-      onLocationPress={(latitude, longitude, locationName) => {
-  // Close video player and navigate to map (full page)
-  router.replace({
-    pathname: '/(tabs)/map',
-    params: {
-      latitude: latitude.toString(),
-      longitude: longitude.toString(),
-      locationName: locationName || 'Video Location',
-    },
-  });
-}}
+ onLocationPress={(latitude, longitude, locationName) => {
+        // Pass only the video ID. The map looks the video up by ID, reads its
+        // true coords from its own query, and applies the privacy offset
+        // itself. We deliberately DON'T send coordinates, so true locations
+        // never travel through navigation params at all.
+        router.replace({
+          pathname: '/(tabs)/map',
+          params: {
+            videoId: item.id,
+            fromFeed: 'true',
+          },
+        });
+      }}
     />
   );
 };
@@ -422,7 +365,7 @@ const transformedVideos: VideoPost[] = filteredData.map((video: any) => ({
         <Text style={styles.emptyText}>😔 Video Expired</Text>
         <Text style={styles.emptySubtext}>
           This video is no longer available.{'\n'}
-          Videos expire after 1 hour.
+          Videos expire after 24 hours.
         </Text>
         
         <Pressable 
@@ -446,6 +389,32 @@ const transformedVideos: VideoPost[] = filteredData.map((video: any) => ({
         enabled={true}
       >
         <SafeAreaView style={styles.container} edges={['top']}>
+          {/* Search button - top left */}
+          <Pressable
+            style={styles.topLeftButton}
+            onPress={() => router.push('/(tabs)/search')}
+          >
+            <IconSymbol
+              ios_icon_name="magnifyingglass"
+              android_material_icon_name="search"
+              size={20}
+              color="#FFFFFF"
+            />
+          </Pressable>
+
+          {/* Close button - top right */}
+          <Pressable
+            style={styles.topRightButton}
+            onPress={() => router.back()}
+          >
+            <IconSymbol
+              ios_icon_name="xmark"
+              android_material_icon_name="close"
+              size={20}
+              color="#FFFFFF"
+            />
+          </Pressable>
+
           <FlatList
             ref={flatListRef}
             data={videos}
@@ -458,10 +427,10 @@ const transformedVideos: VideoPost[] = filteredData.map((video: any) => ({
             decelerationRate="fast"
             onViewableItemsChanged={onViewableItemsChanged}
             viewabilityConfig={viewabilityConfig}
-            removeClippedSubviews={false}
-            maxToRenderPerBatch={3}
-            windowSize={5}
-            initialNumToRender={2}
+            removeClippedSubviews={true}
+maxToRenderPerBatch={1}
+windowSize={2}
+initialNumToRender={1}
             getItemLayout={(data, index) => ({
               length: SCREEN_HEIGHT,
               offset: SCREEN_HEIGHT * index,
@@ -530,5 +499,29 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#FFFFFF',
+  },
+  topLeftButton: {
+    position: 'absolute',
+    top: 60,
+    left: 16,
+    zIndex: 1001,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 20,
+    width: 36,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  topRightButton: {
+    position: 'absolute',
+    top: 60,
+    right: 16,
+    zIndex: 1001,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 20,
+    width: 36,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });
