@@ -787,6 +787,15 @@ const getCurrentLocation = async () => {
     setActiveVideoIndex(0);
   }, []);
 
+  // ⏸️ Close video modal when map tab loses focus (reinforces VideoPlayer cleanup)
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        handleCloseModal();
+      };
+    }, [handleCloseModal])
+  );
+
   const handleModalSwipe = useCallback(({ nativeEvent }: any) => {
     if (nativeEvent.state === State.ACTIVE) {
       const { translationX, velocityX } = nativeEvent;

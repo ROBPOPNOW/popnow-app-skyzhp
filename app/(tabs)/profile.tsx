@@ -2234,6 +2234,15 @@ const handleVideoPress = (video: VideoPost, index: number, videoList: VideoPost[
     setSelectedVideo(null);
   };
 
+  // ⏸️ Close video modal when profile screen loses focus (reinforces VideoPlayer cleanup)
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        handleCloseVideoModal();
+      };
+    }, [])
+  );
+
   const toggleSelectMode = () => {
     setIsSelectMode(!isSelectMode);
     setSelectedVideoIds(new Set());

@@ -15,7 +15,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { IconSymbol } from '@/components/IconSymbol';
 import { supabase } from '@/lib/supabase';
 import { colors } from '@/styles/commonStyles';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { getVideoThumbnailUrl } from '@/utils/bunnynet';
 import { PremiumAvatar } from '@/components/PremiumAvatar';
 import VideoFeedItem from '@/components/VideoFeedItem';
@@ -59,6 +59,15 @@ const [videoModalVisible, setVideoModalVisible] = useState(false);
     checkIfFollowing();
     checkIfBlocked();
   }, [userId, showVisibleOnly]);
+
+  // ⏸️ Close video modal when leaving this user's profile screen
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        setVideoModalVisible(false);
+      };
+    }, [])
+  );
 
   const handleAvatarPressInModal = (userId: string) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');

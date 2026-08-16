@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { getVideoPlaybackUrl } from '@/utils/bunnynet';
+import * as nowPlaying from '@/utils/nowPlayingRegistry';
 import { colors } from '@/styles/commonStyles';
 
 interface VideoPlayerProps {
@@ -45,6 +46,7 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, is2x = fals
   const barAnimHeight = useRef(new Animated.Value(BAR_HEIGHT_NORMAL)).current;
   const isSeekingRef = useRef(false);
   const hasLoadedRef = useRef(false);
+  const nowPlayingTokenRef = useRef({});
 
   useEffect(() => {
     mountedRef.current = true;
@@ -155,9 +157,20 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, is2x = fals
       try {
         player.muted = false;
         player.volume = 1.0;
+        const stopThisPlayer = () => {
+          if (!mountedRef.current) return;
+          try {
+            player.pause();
+            player.muted = true;
+            player.volume = 0;
+            player.currentTime = 0;
+          } catch (e) {}
+        };
+        nowPlaying.setActive(nowPlayingTokenRef.current, stopThisPlayer);
         if (!isPaused) player.play();
       } catch (error) {}
     } else {
+      nowPlaying.clear(nowPlayingTokenRef.current);
       try {
         player.pause();
         player.muted = true;
@@ -176,6 +189,7 @@ export default function VideoPlayer({ videoUrl, isActive, libraryId, is2x = fals
   // Cleanup
   useEffect(() => {
     return () => {
+      nowPlaying.clear(nowPlayingTokenRef.current);
       try {
         if (player && typeof player.pause === 'function') {
           player.pause();
