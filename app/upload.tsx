@@ -36,6 +36,9 @@ import { USE_TUS_UPLOAD, USE_EDGE_STATUS_CHECK, USE_EDGE_DELETE } from '@/config
 
 type LocationPrivacy = 'exact' | '3km' | '10km';
 
+const MAX_HASHTAGS = 8;
+const MAX_TAG_LENGTH = 20;
+
 export default function UploadScreen() {
   const params = useLocalSearchParams();
   const requestId = params.requestId as string | undefined;
@@ -45,14 +48,13 @@ export default function UploadScreen() {
 
   const [description, setDescription] = useState('');
   const [hashtags, setHashtags] = useState<string[]>([]);
-  const [suggestedHashtags, setSuggestedHashtags] = useState<string[]>([]);
+  const [hashtagInput, setHashtagInput] = useState('');
   const [location, setLocation] = useState<{
     latitude: number;
     longitude: number;
     name: string;
   } | null>(null);
   const [locationPrivacy, setLocationPrivacy] = useState<LocationPrivacy>('exact');
-  const [isGeneratingDescription, setIsGeneratingDescription] = useState(false);
   const [isRefreshingLocation, setIsRefreshingLocation] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [locationDenied, setLocationDenied] = useState(false);
@@ -247,56 +249,20 @@ export default function UploadScreen() {
     });
   };
 
-  const handleGenerateHashtags = async () => {
-    const words = description.toLowerCase().split(' ');
-    const suggested = words
-      .filter(word => word.length > 3)
-      .map(word => word.replace(/[^a-z0-9]/g, ''))
-      .filter(word => word.length > 0)
-      .slice(0, 5)
-      .map(word => `#${word}`);
-    
-    setSuggestedHashtags(suggested);
-  };
+  const normalizeTag = (raw: string): string =>
+    raw.trim().toLowerCase().replace(/^#+/, '').replace(/[^a-z0-9]/g, '').slice(0, MAX_TAG_LENGTH);
 
-  const handleGenerateDescription = async () => {
-    if (!description.trim()) {
-      Alert.alert('Error', 'Please enter a description first');
+  const handleAddHashtag = () => {
+    const normalized = normalizeTag(hashtagInput);
+    setHashtagInput('');
+    if (!normalized) return;
+    const tag = `#${normalized}`;
+    if (hashtags.includes(tag)) return;
+    if (hashtags.length >= MAX_HASHTAGS) {
+      Alert.alert('Limit reached', `You can add up to ${MAX_HASHTAGS} tags.`);
       return;
     }
-
-    try {
-      setIsGeneratingDescription(true);
-      console.log('Generating AI description from:', description);
-
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        Alert.alert('Error', 'You must be logged in');
-        return;
-      }
-
-      const { data, error } = await supabase.functions.invoke('generate-description', {
-        body: { prompt: description },
-      });
-
-      if (error) {
-        console.error('Error generating description:', error);
-        Alert.alert('Error', 'Failed to generate description. Please try again.');
-        return;
-      }
-
-      if (data && data.description) {
-        console.log('Generated description:', data.description);
-        setDescription(data.description);
-      } else {
-        Alert.alert('Error', 'No description generated');
-      }
-    } catch (error) {
-      console.error('Error in handleGenerateDescription:', error);
-      Alert.alert('Error', 'Failed to generate description');
-    } finally {
-      setIsGeneratingDescription(false);
-    }
+    setHashtags([...hashtags, tag]);
   };
 
   const toggleHashtag = (hashtag: string) => {
@@ -1093,20 +1059,6 @@ if (pendingUploadId) {
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>Description</Text>
-              <Pressable 
-                onPress={handleGenerateDescription} 
-                style={styles.generateButton}
-                disabled={isGeneratingDescription}
-              >
-                {isGeneratingDescription ? (
-                  <ActivityIndicator size="small" color={colors.primary} />
-                ) : (
-                  <>
-                    <IconSymbol ios_icon_name="sparkles" android_material_icon_name="auto-awesome" size={16} color={colors.primary} />
-                    <Text style={styles.generateButtonText}>AI Generate</Text>
-                  </>
-                )}
-              </Pressable>
             </View>
             <TextInput
               style={styles.descriptionInput}
@@ -1118,42 +1070,54 @@ if (pendingUploadId) {
               numberOfLines={3}
             />
             <Text style={styles.helperText}>
-              Type a short description, then tap AI Generate to make it more vivid
+              Type a short description of your video.
             </Text>
           </View>
 
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>Hashtags</Text>
-              <Pressable onPress={handleGenerateHashtags} style={styles.generateButton}>
-                <IconSymbol ios_icon_name="sparkles" android_material_icon_name="auto-awesome" size={16} color={colors.primary} />
-                <Text style={styles.generateButtonText}>Suggest</Text>
+            </View>
+
+            <View style={styles.hashtagInputRow}>
+              <TextInput
+                style={styles.hashtagInputField}
+                value={hashtagInput}
+                onChangeText={setHashtagInput}
+                placeholder="Add a tag"
+                placeholderTextColor={colors.textSecondary}
+                autoCapitalize="none"
+                autoCorrect={false}
+                maxLength={MAX_TAG_LENGTH + 1}
+                returnKeyType="done"
+                onSubmitEditing={handleAddHashtag}
+              />
+              <Pressable
+                onPress={handleAddHashtag}
+                style={styles.addHashtagButton}
+                disabled={!hashtagInput.trim() || hashtags.length >= MAX_HASHTAGS}
+              >
+                <IconSymbol ios_icon_name="plus" android_material_icon_name="add" size={18} color="#FFFFFF" />
               </Pressable>
             </View>
-            
-            {suggestedHashtags.length > 0 && (
+
+            {hashtags.length > 0 && (
               <View style={styles.hashtagsContainer}>
-                {suggestedHashtags.map((tag) => (
+                {hashtags.map((tag) => (
                   <Pressable
                     key={tag}
-                    style={[
-                      styles.hashtagChip,
-                      hashtags.includes(tag) && styles.hashtagChipActive,
-                    ]}
+                    style={styles.hashtagChip}
                     onPress={() => toggleHashtag(tag)}
                   >
-                    <Text
-                      style={[
-                        styles.hashtagChipText,
-                        hashtags.includes(tag) && styles.hashtagChipTextActive,
-                      ]}
-                    >
-                      {tag}
-                    </Text>
+                    <Text style={styles.hashtagChipText}>{tag} ✕</Text>
                   </Pressable>
                 ))}
               </View>
             )}
+
+            <Text style={styles.helperText}>
+              {hashtags.length}/{MAX_HASHTAGS} tags. Tap a tag to remove it.
+            </Text>
           </View>
 
           <View style={styles.section}>
@@ -1410,6 +1374,31 @@ const styles = StyleSheet.create({
   },
   hashtagChipTextActive: {
     color: '#FFFFFF',
+  },
+  hashtagInputRow: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  hashtagInputField: {
+    flex: 1,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.textSecondary + '30',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: colors.text,
+  },
+  addHashtagButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   locationCard: {
     flexDirection: 'row',
