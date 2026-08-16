@@ -20,6 +20,7 @@ import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { colors } from '@/styles/commonStyles';
 import { Pressable } from 'react-native';
 import { IconSymbol } from '@/components/IconSymbol';
+import { isVideoStillPublic, showLocationExpiredAlert } from '@/utils/videoVisibility';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -310,6 +311,10 @@ const transformedVideos: VideoPost[] = filteredData.map((video: any) => ({
   });
 }}
  onLocationPress={(latitude, longitude, locationName) => {
+        if (!isVideoStillPublic(item.createdAt)) {
+          showLocationExpiredAlert();
+          return;
+        }
         // Pass only the video ID. The map looks the video up by ID, reads its
         // true coords from its own query, and applies the privacy offset
         // itself. We deliberately DON'T send coordinates, so true locations

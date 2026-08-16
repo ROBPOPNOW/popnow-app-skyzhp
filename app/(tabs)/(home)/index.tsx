@@ -22,6 +22,7 @@ import { useAdManager } from '@/hooks/useAdManager';
 import { router, useFocusEffect } from 'expo-router';
 import { colors } from '@/styles/commonStyles';
 import { IconSymbol } from '@/components/IconSymbol';
+import { isVideoStillPublic, showLocationExpiredAlert } from '@/utils/videoVisibility';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 const TAB_BAR_HEIGHT = 50; // compact tab bar height
@@ -353,6 +354,10 @@ export default function HomeScreen() {
         onViewChange={handleViewChange}
         userLocation={userLocation}
         onLocationPress={(actualLat, actualLng, locationName) => {
+          if (!isVideoStillPublic(item.createdAt)) {
+            showLocationExpiredAlert();
+            return;
+          }
           // Pass only the video ID. The map looks the video up by ID, reads its
           // true coords from its own query, and applies the privacy offset
           // itself. We deliberately DON'T send coordinates, so true locations

@@ -13,6 +13,7 @@ import { supabase } from '@/lib/supabase';
 import { USE_TUS_UPLOAD, USE_EDGE_STATUS_CHECK, USE_EDGE_DELETE, USE_EDGE_DOWNLOAD } from '@/config/uploadFlags';
 import { colors } from '@/styles/commonStyles';
 import { requestMediaLibraryPermission, requestMediaLibrarySavePermission } from '@/utils/permissions';
+import { isVideoStillPublic, showLocationExpiredAlert } from '@/utils/videoVisibility';
 import { File, Directory, Paths } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
 import { GestureHandlerRootView, Swipeable, PanGestureHandler, State } from 'react-native-gesture-handler';
@@ -3452,6 +3453,20 @@ const tabs: TabBarItem[] = [
                       onLike={handleLike}
                       userLocation={userLocation}
                       hideUnlikeButton={activeTab !== 'liked'}
+                      onLocationPress={() => {
+                        if (!isVideoStillPublic(item.createdAt)) {
+                          showLocationExpiredAlert();
+                          return;
+                        }
+                        setVideoModalVisible(false);
+                        setTimeout(() => {
+                          if (!mountedRef.current) return;
+                          router.push({
+                            pathname: '/(tabs)/map',
+                            params: { videoId: item.id, fromFeed: 'true' },
+                          });
+                        }, 100);
+                      }}
                       onAvatarPress={(userId) => {
                         setVideoModalVisible(false);
 setTimeout(() => {

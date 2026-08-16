@@ -20,6 +20,7 @@ import { getVideoThumbnailUrl } from '@/utils/bunnynet';
 import { PremiumAvatar } from '@/components/PremiumAvatar';
 import VideoFeedItem from '@/components/VideoFeedItem';
 import { VideoPost } from '@/types/video';
+import { isVideoStillPublic, showLocationExpiredAlert } from '@/utils/videoVisibility';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const GRID_ITEM_SIZE = (SCREEN_WIDTH - 48) / 3;
@@ -525,6 +526,19 @@ const [videoModalVisible, setVideoModalVisible] = useState(false);
                     onViewChange={handleViewChange}
                     userLocation={null}
                     onAvatarPress={handleAvatarPressInModal}
+                    onLocationPress={() => {
+                      if (!isVideoStillPublic(item.createdAt)) {
+                        showLocationExpiredAlert();
+                        return;
+                      }
+                      setVideoModalVisible(false);
+                      setTimeout(() => {
+                        router.push({
+                          pathname: '/(tabs)/map',
+                          params: { videoId: item.id, fromFeed: 'true' },
+                        });
+                      }, 100);
+                    }}
                   />
                 </View>
               )}

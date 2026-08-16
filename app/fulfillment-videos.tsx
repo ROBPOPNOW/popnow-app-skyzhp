@@ -25,6 +25,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { getVideoDownloadUrl, getDownloadUrlViaEdgeFunction, isPremiumLibrary } from '@/utils/bunnynet';
 import { requestMediaLibrarySavePermission } from '@/utils/permissions';
 import { USE_EDGE_DOWNLOAD } from '@/config/uploadFlags';
+import { isVideoStillPublic, showLocationExpiredAlert } from '@/utils/videoVisibility';
 // 🪙 PHASE 7 IMPORT
 import { awardWinnerCoins } from '@/utils/request-coins';
 
@@ -727,6 +728,16 @@ Alert.alert(
         onLike={handleLike}
         onViewChange={handleViewChange}
         userLocation={userLocation}
+        onLocationPress={() => {
+          if (!isVideoStillPublic(item.createdAt)) {
+            showLocationExpiredAlert();
+            return;
+          }
+          router.push({
+            pathname: '/(tabs)/map',
+            params: { videoId: item.id, fromFeed: 'true' },
+          });
+        }}
       />
       
       {/* 🪙 Requester Action Buttons */}
