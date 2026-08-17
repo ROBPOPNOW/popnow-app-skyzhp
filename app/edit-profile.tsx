@@ -21,6 +21,7 @@ import * as Location from 'expo-location';
 import * as FileSystem from 'expo-file-system/legacy';
 import { IconSymbol } from '@/components/IconSymbol';
 import UsernameInput from '@/components/UsernameInput';
+import LocationInput from '@/components/LocationInput';
 
 export default function EditProfileScreen() {
   const params = useLocalSearchParams();
@@ -35,7 +36,8 @@ export default function EditProfileScreen() {
   const [saving, setSaving] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [isUsernameValid, setIsUsernameValid] = useState(false);
-const [isValidatingCity, setIsValidatingCity] = useState(false);
+  const [isValidatingCity, setIsValidatingCity] = useState(false);
+  const [locationCoords, setLocationCoords] = useState<{ latitude: number; longitude: number } | null>(null);
 
   useEffect(() => {
     loadProfile();
@@ -56,12 +58,12 @@ const [isValidatingCity, setIsValidatingCity] = useState(false);
         .single();
 
       if (profile) {
-  if (!username) setUsername(profile.username || '');
-  setCurrentUsername(profile.username || ''); // ← ADD THIS LINE
-  if (!bio) setBio(profile.bio || '');
-  if (!location) setLocation(profile.location || '');
-  setAvatarUrl(profile.avatar_url);
-}
+        if (!username) setUsername(profile.username || '');
+        setCurrentUsername(profile.username || '');
+        if (!bio) setBio(profile.bio || '');
+        if (!location) setLocation(profile.location || '');
+        setAvatarUrl(profile.avatar_url);
+      }
     } catch (error) {
       console.error('Error loading profile:', error);
     } finally {
@@ -72,7 +74,7 @@ const [isValidatingCity, setIsValidatingCity] = useState(false);
   const pickImage = async () => {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      
+
       if (status !== 'granted') {
         Alert.alert(
           'Permission Required',
@@ -104,17 +106,14 @@ const [isValidatingCity, setIsValidatingCity] = useState(false);
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('No user');
 
-      // Read file as base64
       const base64 = await FileSystem.readAsStringAsync(uri, {
         encoding: FileSystem.EncodingType.Base64,
       });
 
-      // Generate filename
       const fileExt = uri.split('.').pop()?.toLowerCase() || 'jpg';
       const fileName = `${user.id}-${Date.now()}.${fileExt}`;
       const filePath = `avatars/${fileName}`;
 
-      // Upload to Supabase Storage
       const { error: uploadError } = await supabase.storage
         .from('avatars')
         .upload(filePath, decode(base64), {
@@ -124,17 +123,15 @@ const [isValidatingCity, setIsValidatingCity] = useState(false);
 
       if (uploadError) throw uploadError;
 
-      // Get public URL
       const { data: { publicUrl } } = supabase.storage
         .from('avatars')
         .getPublicUrl(filePath);
 
-      // Update user profile
       const { error: updateError } = await supabase
         .from('users')
-        .update({ 
+        .update({
           avatar_url: publicUrl,
-          moderation_status: 'pending' // Avatar needs moderation
+          moderation_status: 'pending',
         })
         .eq('id', user.id);
 
@@ -150,7 +147,6 @@ const [isValidatingCity, setIsValidatingCity] = useState(false);
     }
   };
 
-  // Helper function to decode base64
   const decode = (base64: string): ArrayBuffer => {
     const binaryString = atob(base64);
     const bytes = new Uint8Array(binaryString.length);
@@ -171,64 +167,74 @@ const [isValidatingCity, setIsValidatingCity] = useState(false);
       }
 
       // Validation
-if (isFirstTime && !username.trim()) {
-  Alert.alert('Required', 'Please enter a username');
-  return;
-}
+      if (isFirstTime && !username.trim()) {
+        Alert.alert('Required', 'Please enter a username');
+        return;
+      }
 
-if (isFirstTime && !isUsernameValid) {
-  Alert.alert('Invalid Username', 'Please enter a valid, available username');
-  return;
-}
+      if (isFirstTime && !isUsernameValid) {
+        Alert.alert('Invalid Username', 'Please enter a valid, available username');
+        return;
+      }
 
-if (!location.trim()) {
-  Alert.alert('Required', 'Please enter your city');
-  return;
-}
+      if (!location.trim()) {
+        Alert.alert('Required', 'Please enter your city');
+        return;
+      }
 
-// Validate city name is real and geocodable
-setIsValidatingCity(true);
-try {
-  const geocodeResult = await Location.geocodeAsync(location.trim());
-  if (!geocodeResult || geocodeResult.length === 0) {
-    Alert.alert(
-      'Invalid City',
-      `No city found for "${location.trim()}". Please enter a valid city name.`
-    );
-    setIsValidatingCity(false);
-    return;
-  }
-  // Cache the coordinates for offline use
-  const { latitude, longitude } = geocodeResult[0];
-  const AsyncStorage = require('@react-native-async-storage/async-storage').default;
-  await AsyncStorage.setItem('default_city_location', JSON.stringify({
-    latitude,
-    longitude,
-    cityName: location.trim(),
-    timestamp: Date.now(),
-  }));
-} catch (error) {
-  Alert.alert(
-    'Validation Error',
-    'Could not validate city name. Please check your internet connection and try again.'
-  );
-  setIsValidatingCity(false);
-  return;
-} finally {
-  setIsValidatingCity(false);
-}
+      // Geocode and cache coordinates
+      setIsValidatingCity(true);
+      try {
+        let latitude: number;
+        let longitude: number;
+
+        if (locationCoords) {
+          // Already geocoded from dropdown selection
+          latitude = locationCoords.latitude;
+          longitude = locationCoords.longitude;
+        } else {
+          // User typed manually — validate via geocoding
+          const geocodeResult = await Location.geocodeAsync(location.trim());
+          if (!geocodeResult || geocodeResult.length === 0) {
+            Alert.alert(
+              'Invalid City',
+              `No city found for "${location.trim()}". Please select a city from the dropdown suggestions.`
+            );
+            setIsValidatingCity(false);
+            return;
+          }
+          latitude = geocodeResult[0].latitude;
+          longitude = geocodeResult[0].longitude;
+        }
+
+        const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+        await AsyncStorage.setItem('default_city_location', JSON.stringify({
+          latitude,
+          longitude,
+          cityName: location.trim(),
+          timestamp: Date.now(),
+        }));
+      } catch (error) {
+        Alert.alert(
+          'Validation Error',
+          'Could not validate city name. Please check your internet connection and try again.'
+        );
+        setIsValidatingCity(false);
+        return;
+      } finally {
+        setIsValidatingCity(false);
+      }
 
       const updates: any = {
-        bio: bio.trim(),
-        location: location.trim(),
-      };
+  bio: bio.trim(),
+  location: location.trim(),
+  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+};
 
-      // Only update username if it's changed
       if (username.trim()) {
         updates.username = username.trim().toLowerCase();
       }
 
-      // Mark profile as completed on first save
       if (isFirstTime) {
         updates.profile_completed = true;
       }
@@ -241,7 +247,7 @@ try {
       if (error) throw error;
 
       Alert.alert('Success', 'Profile updated successfully');
-      
+
       if (isFirstTime) {
         router.replace('/(tabs)/(home)/' as any);
       } else {
@@ -271,16 +277,16 @@ try {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.keyboardAvoid}
       >
-        <ScrollView style={styles.scrollView}>
+        <ScrollView style={styles.scrollView} keyboardShouldPersistTaps="handled">
           {/* Header */}
           <View style={styles.header}>
             {!isFirstTime && (
               <Pressable onPress={() => router.back()} style={styles.backButton}>
-                <IconSymbol 
-                  ios_icon_name="chevron.left" 
-                  android_material_icon_name="arrow-back" 
-                  size={24} 
-                  color={colors.text} 
+                <IconSymbol
+                  ios_icon_name="chevron.left"
+                  android_material_icon_name="arrow-back"
+                  size={24}
+                  color={colors.text}
                 />
               </Pressable>
             )}
@@ -297,11 +303,11 @@ try {
                 <Image source={{ uri: avatarUrl }} style={styles.avatar} />
               ) : (
                 <View style={[styles.avatar, styles.avatarPlaceholder]}>
-                  <IconSymbol 
-                    ios_icon_name="person.fill" 
-                    android_material_icon_name="person" 
-                    size={48} 
-                    color={colors.textSecondary} 
+                  <IconSymbol
+                    ios_icon_name="person.fill"
+                    android_material_icon_name="person"
+                    size={48}
+                    color={colors.textSecondary}
                   />
                 </View>
               )}
@@ -323,13 +329,13 @@ try {
             <View style={styles.field}>
               <Text style={styles.label}>Username {isFirstTime && '*'}</Text>
               <UsernameInput
-  value={username}
-  onChangeText={setUsername}
-  onValidationChange={(isValid) => {
-    setIsUsernameValid(isValid);
-  }}
-  currentUsername={currentUsername}
-/>
+                value={username}
+                onChangeText={setUsername}
+                onValidationChange={(isValid) => {
+                  setIsUsernameValid(isValid);
+                }}
+                currentUsername={currentUsername}
+              />
             </View>
 
             <View style={styles.field}>
@@ -346,35 +352,36 @@ try {
               />
             </View>
 
-           <View style={styles.field}>
-  <Text style={styles.label}>Location *</Text>
-  <TextInput
-    style={styles.input}
-    value={location}
-    onChangeText={setLocation}
-    placeholder="Enter your city (e.g. Auckland, Tokyo)"
-    placeholderTextColor={colors.textSecondary}
-  />
-  <Text style={styles.fieldTip}>
-    Enter your city so the map shows your area by default
-  </Text>
-</View>
+            <View style={styles.field}>
+              <Text style={styles.label}>Location *</Text>
+              <LocationInput
+                value={location}
+                onChangeText={setLocation}
+                onLocationSelect={(locationName, latitude, longitude) => {
+                  setLocation(locationName);
+                  setLocationCoords({ latitude, longitude });
+                }}
+              />
+              <Text style={styles.fieldTip}>
+                Enter your city so the map shows your area by default
+              </Text>
+            </View>
           </View>
 
           {/* Save Button */}
           <Pressable
-  style={[styles.saveButton, (saving || isValidatingCity) && styles.saveButtonDisabled]}
-  onPress={handleSave}
-  disabled={saving || isValidatingCity}
->
-  {(saving || isValidatingCity) ? (
-    <ActivityIndicator size="small" color="#FFFFFF" />
-  ) : (
-    <Text style={styles.saveButtonText}>
-      {isFirstTime ? 'Complete Profile' : 'Save Changes'}
-    </Text>
-  )}
-</Pressable>
+            style={[styles.saveButton, (saving || isValidatingCity) && styles.saveButtonDisabled]}
+            onPress={handleSave}
+            disabled={saving || isValidatingCity}
+          >
+            {(saving || isValidatingCity) ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <Text style={styles.saveButtonText}>
+                {isFirstTime ? 'Complete Profile' : 'Save Changes'}
+              </Text>
+            )}
+          </Pressable>
 
           {isFirstTime && (
             <Text style={styles.requiredNote}>* Required field</Text>
@@ -501,15 +508,15 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   requiredNote: {
-  textAlign: 'center',
-  color: colors.textSecondary,
-  fontSize: 14,
-  marginBottom: 24,
-},
-fieldTip: {
-  fontSize: 12,
-  color: colors.textSecondary,
-  marginTop: 6,
-  marginLeft: 4,
-},
+    textAlign: 'center',
+    color: colors.textSecondary,
+    fontSize: 14,
+    marginBottom: 24,
+  },
+  fieldTip: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginTop: 6,
+    marginLeft: 4,
+  },
 });
