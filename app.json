@@ -16,7 +16,7 @@
       "EXPO_PUBLIC_BUNNY_PREMIUM_CDN_HOSTNAME": "vz-bf878a45-f2f.b-cdn.net",
       "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNwZHNnbWtpcnVibmdmZHh4cnpqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjExMTMxNTksImV4cCI6MjA3NjY4OTE1OX0.1LzX5D49T5MU01Ew_JlY_5YXaeGlq3atHs0VIN1j7bM"
     },
-    "version": "1.0.14",
+    "version": "1.0.15",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "popnow",
@@ -34,7 +34,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "world.popnow.app",
-      "buildNumber": "42",
+      "buildNumber": "43",
       "icon": "./assets/images/icon.png",
       "associatedDomains": [
         "applinks:popnow.world"
@@ -58,7 +58,7 @@
         "backgroundColor": "#350420"
       },
       "package": "world.popnow.app",
-      "versionCode": 66,
+      "versionCode": 67,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
