@@ -1,0 +1,11 @@
+# Local secrets - never read or expose
+.env.local
+.env*.local
+
+# Files containing API keys / credentials
+**/*apikey*
+**/*api-key*
+**/*secret*
+**/*credentials*
+google-services.json
+GoogleService-Info.plist

@@ -16,6 +16,7 @@ import { colors } from '@/styles/commonStyles';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { GestureHandlerRootView, PinchGestureHandler, State } from 'react-native-gesture-handler';
+import * as FileSystem from 'expo-file-system/legacy';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -132,6 +133,17 @@ export default function RecordVideoScreen() {
           return newDuration;
         });
       }, 1000);
+
+      // Ensure the Camera directory exists for Android file creation
+      await FileSystem.makeDirectoryAsync(
+        `${FileSystem.cacheDirectory}Camera/`,
+        { intermediates: true }
+      );
+
+      // Wait for camera to fully initialize on Android
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      if (!cameraRef.current || recordingCancelledRef.current) return;
 
       const video = await cameraRef.current.recordAsync({
         maxDuration: 30,

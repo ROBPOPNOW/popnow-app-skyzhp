@@ -479,7 +479,12 @@ setTimeout(() => setShowCoinAnimation(false), 1100);
               </>
             ) : (
               <Pressable style={styles.locationPlaceholder} onPress={getCurrentLocation}>
-                <IconSymbol name="location" size={24} color={colors.textSecondary} />
+                <IconSymbol
+  ios_icon_name="location"
+  android_material_icon_name="location-on"
+  size={24}
+  color={colors.textSecondary}
+/>
                 <Text style={styles.locationPlaceholderText}>
                   Tap to set location
                 </Text>

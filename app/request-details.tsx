@@ -460,7 +460,7 @@ const handleDeleteRequest = async (requestId: string) => {
         <View style={{ width: 40 }} />
       </LinearGradient>
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView style={styles.content} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 130 }}>
         <View style={styles.card}>
           <View style={styles.cardHeader}>
             <View style={styles.userInfo}>

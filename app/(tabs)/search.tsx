@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PremiumAvatar } from '@/components/PremiumAvatar';
 import { colors } from '@/styles/commonStyles';
 import { VideoPost } from '@/types/video';
@@ -45,7 +45,16 @@ const styles = StyleSheet.create({
     padding: 16,
     paddingTop: 8,
   },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  closeButton: {
+    padding: 8,
+  },
   searchContainer: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: colors.card,
@@ -244,7 +253,15 @@ const styles = StyleSheet.create({
   },
 });
 
+// FloatingTabBar visual height, excluding the safe-area inset (which the tab
+// bar and this screen both add via insets.bottom). Measured from FloatingTabBar
+// styles: tabBar padding (6+4) + tab content (icon 20 + gap 2 + label ~12) + tab
+// padding (2+2) ≈ 48. The +16 below adds breathing room above the bar.
+const TAB_BAR_HEIGHT = 48;
+
 export default function SearchScreen() {
+  const insets = useSafeAreaInsets();
+  const tabBarHeight = TAB_BAR_HEIGHT + insets.bottom;
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<SearchTab>('videos');
   const [isSearching, setIsSearching] = useState(false);
@@ -257,7 +274,7 @@ export default function SearchScreen() {
     tags: [],
   });
 
-useEffect(() => {
+  useEffect(() => {
     let mounted = true;
 
     const runSearch = async () => {
@@ -284,49 +301,49 @@ useEffect(() => {
     }
 
     setIsSearching(true);
-console.log('Searching for:', query);
+    console.log('Searching for:', query);
 
-try {
-  // Get blocked users
-  let blockedUserIds: string[] = [];
-  const { data: { user } } = await supabase.auth.getUser();
-  if (user) {
-    const { data: blockedData } = await supabase
-      .from('blocked_users')
-      .select('blocked_id')
-      .eq('blocker_id', user.id);
+    try {
+      // Get blocked users
+      let blockedUserIds: string[] = [];
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data: blockedData } = await supabase
+          .from('blocked_users')
+          .select('blocked_id')
+          .eq('blocker_id', user.id);
 
-    const { data: blockedByData } = await supabase
-      .from('blocked_users')
-      .select('blocker_id')
-      .eq('blocked_id', user.id);
+        const { data: blockedByData } = await supabase
+          .from('blocked_users')
+          .select('blocker_id')
+          .eq('blocked_id', user.id);
 
-    blockedUserIds = [
-      ...(blockedData?.map(b => b.blocked_id) || []),
-      ...(blockedByData?.map(b => b.blocker_id) || []),
-    ];
-  }
+        blockedUserIds = [
+          ...(blockedData?.map(b => b.blocked_id) || []),
+          ...(blockedByData?.map(b => b.blocker_id) || []),
+        ];
+      }
 
-  // Search videos
-  const videoResults = await searchVideos(query);
-  
-  // Search users
-  const userResults = await searchUsers(query);
-  
-  // Search tags
-  const tagResults = await searchTags(query);
+      // Search videos
+      const videoResults = await searchVideos(query);
 
-  // Filter blocked users from results
-  const filteredVideos = blockedUserIds.length > 0
-  ? videoResults.filter(v => !blockedUserIds.includes((v as any).users?.id || (v as any).user_id))
-  : videoResults;
+      // Search users
+      const userResults = await searchUsers(query);
 
-  const filteredUsers = blockedUserIds.length > 0
-    ? userResults.filter(u => !blockedUserIds.includes(u.id))
-    : userResults;
+      // Search tags
+      const tagResults = await searchTags(query);
 
-  setVideos(filteredVideos);
-  setSearchResults({ users: filteredUsers, tags: tagResults });
+      // Filter blocked users from results
+      const filteredVideos = blockedUserIds.length > 0
+        ? videoResults.filter(v => !blockedUserIds.includes((v as any).users?.id || (v as any).user_id))
+        : videoResults;
+
+      const filteredUsers = blockedUserIds.length > 0
+        ? userResults.filter(u => !blockedUserIds.includes(u.id))
+        : userResults;
+
+      setVideos(filteredVideos);
+      setSearchResults({ users: filteredUsers, tags: tagResults });
     } catch (error) {
       console.error('Search error:', error);
     } finally {
@@ -342,15 +359,15 @@ try {
       console.log('=== VIDEO SEARCH ===');
       console.log('Search term:', searchTerm);
 
-      // Calculate the timestamp for 1 hour ago
+      // Calculate the timestamp for 24 hours ago
       const oneHourAgo = new Date();
-      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+      oneHourAgo.setHours(oneHourAgo.getHours() - 24);
       const oneHourAgoISO = oneHourAgo.toISOString();
 
       console.log('Loading videos created after:', oneHourAgoISO);
 
       // Search in caption, location_name, and tags
-      // Only show videos created within the last hour
+      // Only show videos created within the last 24 hours
       const { data: videoResults, error: videoError } = await supabase
         .from('videos')
         .select(`
@@ -382,7 +399,7 @@ try {
           .from('likes')
           .select('video_id')
           .eq('user_id', user.id);
-        
+
         likedVideoIds = likes?.map(like => like.video_id) || [];
       }
 
@@ -424,10 +441,10 @@ try {
       const searchTerm = query.toLowerCase();
 
       const { data, error } = await supabase
-  .from('users')
-  .select('*')
-  .or(`username.ilike.%${searchTerm}%`)
-  .limit(50);
+        .from('users')
+        .select('*')
+        .or(`username.ilike.%${searchTerm}%`)
+        .limit(50);
 
       if (error) {
         console.error('Error searching users:', error);
@@ -435,14 +452,14 @@ try {
       }
 
       return (data || []).map((user: any) => ({
-  id: user.id,
-  username: user.username,
-  avatar: user.avatar_url,
-  is_premium: user.is_premium || false,
-  lifetime_videos_count: user.lifetime_videos_count || 0,
-  lifetime_views_count: user.lifetime_views_count || 0,
-  lifetime_likes_count: user.lifetime_likes_count || 0,
-}));
+        id: user.id,
+        username: user.username,
+        avatar: user.avatar_url,
+        is_premium: user.is_premium || false,
+        lifetime_videos_count: user.lifetime_videos_count || 0,
+        lifetime_views_count: user.lifetime_views_count || 0,
+        lifetime_likes_count: user.lifetime_likes_count || 0,
+      }));
     } catch (error) {
       console.error('Error in searchUsers:', error);
       return [];
@@ -455,10 +472,15 @@ try {
       const hashtagSearch = searchTerm.startsWith('#') ? searchTerm : `#${searchTerm}`;
 
       // Get all videos with tags containing the search term
+      const twentyFourHoursAgo = new Date();
+      twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
+      const twentyFourHoursAgoISO = twentyFourHoursAgo.toISOString();
+
       const { data, error } = await supabase
         .from('videos')
         .select('tags')
-        .eq('moderation_status', 'approved');
+        .eq('moderation_status', 'approved')
+        .gte('created_at', twentyFourHoursAgoISO);
 
       if (error) {
         console.error('Error searching tags:', error);
@@ -521,14 +543,14 @@ try {
 
   const handleTagPress = async (tagName: string) => {
     console.log('Tag pressed:', tagName);
-    
+
     // Search for videos with this specific tag
     setIsSearching(true);
     setActiveTab('videos');
-    
+
     try {
       const oneHourAgo = new Date();
-      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+      oneHourAgo.setHours(oneHourAgo.getHours() - 24);
       const oneHourAgoISO = oneHourAgo.toISOString();
 
       const { data: videoResults, error } = await supabase
@@ -560,7 +582,7 @@ try {
           .from('likes')
           .select('video_id')
           .eq('user_id', user.id);
-        
+
         likedVideoIds = likes?.map(like => like.video_id) || [];
       }
 
@@ -626,13 +648,17 @@ try {
         if (videos.length === 0) {
           return (
             <View style={styles.emptyContainer}>
-              <IconSymbol name="film" size={64} color={colors.textSecondary} />
+              <IconSymbol name="film" android_material_icon_name="movie" size={64} color={colors.textSecondary} />
               <Text style={styles.emptyText}>No videos found</Text>
             </View>
           );
         }
         return (
-          <ScrollView style={styles.videoGrid}>
+          <ScrollView
+            style={styles.videoGrid}
+            contentContainerStyle={{ paddingBottom: tabBarHeight + 16 }}
+            showsVerticalScrollIndicator={false}
+          >
             {videos.reduce((rows: VideoPost[][], video, index) => {
               if (index % 2 === 0) rows.push([]);
               rows[rows.length - 1].push(video);
@@ -642,8 +668,8 @@ try {
                 {row.map((video, colIndex) => {
                   const actualIndex = (rowIndex * 2) + colIndex;
                   return (
-                    <Pressable 
-                      key={video.id} 
+                    <Pressable
+                      key={video.id}
                       style={styles.videoCard}
                       onPress={() => handleVideoPress(video, actualIndex)}
                     >
@@ -697,20 +723,24 @@ try {
           );
         }
         return (
-          <ScrollView style={styles.usersList}>
+          <ScrollView
+            style={styles.usersList}
+            contentContainerStyle={{ paddingBottom: tabBarHeight + 16 }}
+            showsVerticalScrollIndicator={false}
+          >
             {searchResults.users.map((user) => (
-              <Pressable 
-                key={user.id} 
+              <Pressable
+                key={user.id}
                 style={styles.userCard}
                 onPress={() => handleUserPress(user)}
               >
                 <PremiumAvatar
-  avatarUrl={user.avatar}
-  size={60}
-  isPremium={user.is_premium || false}
-/>
+                  avatarUrl={user.avatar}
+                  size={60}
+                  isPremium={user.is_premium || false}
+                />
                 <View style={styles.userInfo}>
-                  <Text style={styles.userDisplayName}>{user.displayName}</Text>
+                  <Text style={styles.userDisplayName}>{user.username}</Text>
                   <Text style={styles.userUsername}>@{user.username}</Text>
                 </View>
                 <View style={styles.userStatsContainer}>
@@ -742,10 +772,14 @@ try {
           );
         }
         return (
-          <ScrollView style={styles.tagsList}>
+          <ScrollView
+            style={styles.tagsList}
+            contentContainerStyle={{ paddingBottom: tabBarHeight + 16 }}
+            showsVerticalScrollIndicator={false}
+          >
             {searchResults.tags.map((tag, index) => (
-              <Pressable 
-                key={index} 
+              <Pressable
+                key={index}
                 style={styles.tagCard}
                 onPress={() => handleTagPress(tag.name)}
               >
@@ -768,22 +802,35 @@ try {
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
       >
         <View style={styles.header}>
-          <View style={styles.searchContainer}>
-            <IconSymbol name="magnifyingglass" size={20} color={colors.textSecondary} />
-            <TextInput
-              style={styles.searchInput}
-              placeholder="Search videos, users, or tags"
-              placeholderTextColor={colors.textSecondary}
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            {searchQuery.length > 0 && (
-              <Pressable onPress={() => setSearchQuery('')}>
-                <IconSymbol name="xmark.circle.fill" android_material_icon_name="cancel" size={20} color={colors.textSecondary} />
-              </Pressable>
-            )}
+          <View style={styles.headerRow}>
+            <View style={styles.searchContainer}>
+              <IconSymbol name="magnifyingglass" size={20} color={colors.textSecondary} />
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Search videos, users, or tags"
+                placeholderTextColor={colors.textSecondary}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              {searchQuery.length > 0 && (
+                <Pressable onPress={() => setSearchQuery('')}>
+                  <IconSymbol name="xmark.circle.fill" android_material_icon_name="cancel" size={20} color={colors.textSecondary} />
+                </Pressable>
+              )}
+            </View>
+            <Pressable
+              style={styles.closeButton}
+              onPress={() => router.back()}
+            >
+              <IconSymbol
+                ios_icon_name="xmark"
+                android_material_icon_name="close"
+                size={24}
+                color={colors.text}
+              />
+            </Pressable>
           </View>
         </View>
 
