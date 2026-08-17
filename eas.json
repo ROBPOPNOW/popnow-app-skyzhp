@@ -6,6 +6,7 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "node": "22.13.0",
       "android": {
         "buildType": "apk"
       },
@@ -15,11 +16,20 @@
     },
     "preview": {
       "developmentClient": false,
-      "distribution": "internal"
+      "distribution": "internal",
+      "node": "22.13.0",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_REVENUECAT_API_KEY_IOS": "appl_xcWudPboOAYeEJdjZYDabdgtuhf",
+        "EXPO_PUBLIC_REVENUECAT_API_KEY_ANDROID": "goog_UgRmzwcdSimYbnckKmSrqxQnOQa"
+      }
     },
     "production": {
       "developmentClient": false,
       "distribution": "store",
+      "node": "22.13.0",
       "env": {
         "EXPO_NO_CAPABILITY_SYNC": "1",
         "EXPO_PUBLIC_REVENUECAT_API_KEY_IOS": "appl_xcWudPboOAYeEJdjZYDabdgtuhf",

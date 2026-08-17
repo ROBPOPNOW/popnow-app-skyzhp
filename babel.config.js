@@ -40,6 +40,26 @@ module.exports = function (api) {
       ],
       ...EDITABLE_COMPONENTS,
       "@babel/plugin-proposal-export-namespace-from",
+      function () {
+        return {
+          visitor: {
+            CallExpression(path) {
+              if (
+                path.node.callee.type === "Import" &&
+                path.node.arguments.length > 0
+              ) {
+                const arg = path.node.arguments[0];
+                if (
+                  arg.type === "Identifier" &&
+                  arg.name === "OTEL_PKG"
+                ) {
+                  path.replaceWithSourceString("Promise.resolve({})");
+                }
+              }
+            },
+          },
+        };
+      },
     ],
   };
 };

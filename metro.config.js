@@ -6,6 +6,11 @@ const fs = require('fs');
 const config = getDefaultConfig(__dirname);
 
 config.resolver.unstable_enablePackageExports = true;
+config.resolver.blockList = [
+  /node_modules\/@opentelemetry\/.*/,
+  /node_modules\/ws\/.*/,
+  /node_modules\/@supabase\/supabase-js\/node_modules\/ws\/.*/,
+];
 
 // Use turborepo to restore the cache when possible
 config.cacheStores = [
