@@ -14,7 +14,8 @@ try {
     const adsModule = require('react-native-google-mobile-ads');
     InterstitialAd = adsModule.InterstitialAd;
     AdEventType = adsModule.AdEventType;
-    MobileAds = adsModule.default;
+    // ✅ Call MobileAds() to get the instance
+    MobileAds = adsModule.default();
   }
 } catch (error) {
   console.warn('⚠️ AdMob not available:', error);
@@ -22,124 +23,154 @@ try {
 
 const STORAGE_KEY = 'videos_watched_since_ad';
 
-// ✅ Module-level flag — persists across reconnects
-let globalInitialized = false;
+let moduleAd: any = null;
+let moduleAdLoaded = false;
+let moduleAdMobInitialized = false;
+let moduleAdMobInitializing = false;
+
+// ✅ Outside the hook
+const createAd = () => {
+  if (!InterstitialAd || !AdEventType) return;
+  if (moduleAd) return;
+
+  console.log('🎬 Creating interstitial ad...');
+  console.log('📋 Ad unit ID:', AdMobConfig.interstitialAdUnitId);
+
+  try {
+    const ad = InterstitialAd.createForAdRequest(
+      AdMobConfig.interstitialAdUnitId,
+      {
+        requestNonPersonalizedAdsOnly: false,
+        keywords: ['social', 'video', 'entertainment'],
+      }
+    );
+
+    moduleAd = ad;
+
+    ad.addAdEventListener(AdEventType.LOADED, () => {
+      console.log('✅ Interstitial ad LOADED successfully');
+      moduleAdLoaded = true;
+    });
+
+    ad.addAdEventListener(AdEventType.CLOSED, () => {
+      console.log('🔄 Ad closed - reloading for next time');
+      moduleAdLoaded = false;
+      AsyncStorage.setItem(STORAGE_KEY, '0').catch(() => {});
+      setTimeout(() => {
+        if (moduleAd) {
+          console.log('🔄 Reloading ad after close...');
+          moduleAd.load();
+        }
+      }, 1000);
+    });
+
+    ad.addAdEventListener(AdEventType.ERROR, (error: any) => {
+      console.error('❌ Ad FAILED to load:', JSON.stringify(error));
+      moduleAdLoaded = false;
+      setTimeout(() => {
+        if (moduleAd) {
+          console.log('🔄 Retrying ad load after error...');
+          moduleAd.load();
+        }
+      }, 30000);
+    });
+
+    console.log('📡 Calling ad.load()...');
+    ad.load();
+
+  } catch (e) {
+    console.error('❌ Ad creation error:', e);
+    moduleAd = null;
+  }
+};
+
+// ✅ Outside the hook
+const initAdMob = () => {
+  if (moduleAdMobInitialized) {
+    if (!moduleAd) {
+      createAd();
+    } else if (!moduleAdLoaded) {
+      console.log('🔄 AdMob already init, reloading ad...');
+      moduleAd.load();
+    }
+    return;
+  }
+
+  if (moduleAdMobInitializing) return;
+
+if (!MobileAds || typeof MobileAds.initialize !== 'function') {
+  console.error('❌ MobileAds.initialize is not a function:', MobileAds);
+  return;
+}
+
+  moduleAdMobInitializing = true;
+
+  console.log('🚀 Initializing AdMob...');
+  MobileAds.initialize()
+    .then(() => {
+      console.log('✅ AdMob SDK initialized');
+      moduleAdMobInitialized = true;
+      moduleAdMobInitializing = false;
+      createAd();
+    })
+    .catch((e: any) => {
+      console.error('❌ AdMob init error:', e);
+      moduleAdMobInitializing = false;
+      setTimeout(initAdMob, 10000);
+    });
+};
 
 export const useAdManager = (isPremium: boolean = false) => {
-  const interstitialRef = useRef<any>(null);
-  const isAdLoadedRef = useRef(false);
   const videosWatchedRef = useRef(0);
-  const isInitialized = useRef(false);
-  const adMobReadyRef = useRef(false);
-  const isPremiumRef = useRef(isPremium);
   const effectsRan = useRef(false);
+  const isPremiumRef = useRef(isPremium);
 
-  // ✅ Runs on every render safely — just a ref assignment, no setState
   isPremiumRef.current = isPremium;
 
-  // ✅ Single guarded useEffect for all initialization
   useEffect(() => {
     if (effectsRan.current) return;
     effectsRan.current = true;
 
-    // Load saved count from AsyncStorage on mount
     AsyncStorage.getItem(STORAGE_KEY)
       .then((saved) => {
-        if (saved) {
-          videosWatchedRef.current = parseInt(saved, 10) || 0;
-        }
+        if (saved) videosWatchedRef.current = parseInt(saved, 10) || 0;
       })
       .catch(() => {});
 
-    // Initialize AdMob
-    if (!MobileAds) {
+    if (!MobileAds || isExpoGo) {
       console.log('📱 AdMob not available');
       return;
     }
 
-    if (globalInitialized) return;
-    globalInitialized = true;
-
-   if (typeof MobileAds.initialize !== 'function') return;
-    MobileAds.initialize()
-      .then(() => {
-        console.log('✅ AdMob ready');
-        adMobReadyRef.current = true;
-        initAd();
-      })
-      .catch((e: any) => {
-        console.error('❌ AdMob init error:', e);
-        globalInitialized = false;
-      });
-  }, []);
-
-  const initAd = () => {
-    if (isInitialized.current) return;
-    if (!adMobReadyRef.current) return;
-    if (!InterstitialAd || !AdEventType) return;
     if (isPremiumRef.current) return;
 
-    isInitialized.current = true;
-
     try {
-      const interstitial = InterstitialAd.createForAdRequest(
-        AdMobConfig.interstitialAdUnitId,
-        { requestNonPersonalizedAdsOnly: false }
-      );
-
-      interstitialRef.current = interstitial;
-
-      interstitial.addAdEventListener(AdEventType.LOADED, () => {
-        console.log('✅ Ad loaded');
-        isAdLoadedRef.current = true;
-      });
-
-      interstitial.addAdEventListener(AdEventType.CLOSED, () => {
-        console.log('🔄 Ad closed, resetting counter');
-        isAdLoadedRef.current = false;
-        videosWatchedRef.current = 0;
-        AsyncStorage.setItem(STORAGE_KEY, '0').catch(() => {});
-        interstitial.load();
-      });
-
-      interstitial.addAdEventListener(AdEventType.ERROR, (e: any) => {
-        console.error('❌ Ad error:', e);
-        isAdLoadedRef.current = false;
-        setTimeout(() => {
-          if (interstitialRef.current) {
-            interstitialRef.current.load();
-          }
-        }, 5000);
-      });
-
-      interstitial.load();
-      console.log('✅ Ad creation complete');
+      initAdMob();
     } catch (e) {
-      console.error('❌ Ad creation error:', e);
+      console.error('❌ initAdMob threw:', e);
     }
-  };
+  }, []);
 
   const trackVideoView = () => {
     try {
-      if (isPremiumRef.current) {
-        console.log('⭐ Premium user - skipping ad tracking');
-        return;
-      }
+      if (isPremiumRef.current) return;
 
       videosWatchedRef.current += 1;
       const count = videosWatchedRef.current;
 
       AsyncStorage.setItem(STORAGE_KEY, String(count)).catch(() => {});
-
       console.log(`📹 Video watched: ${count}/${AdMobConfig.videosBeforeAd}`);
+      console.log(`📊 Ad state - loaded: ${moduleAdLoaded}, ad exists: ${!!moduleAd}, initialized: ${moduleAdMobInitialized}`);
 
       if (count >= AdMobConfig.videosBeforeAd) {
-        if (isAdLoadedRef.current && interstitialRef.current) {
-          console.log('🎬 Showing ad...');
-          interstitialRef.current.show()
+        if (moduleAdLoaded && moduleAd) {
+          console.log('🎬 Showing interstitial ad...');
+          moduleAd.show()
             .then(() => {
-              isAdLoadedRef.current = false;
+              console.log('✅ Ad shown successfully');
+              moduleAdLoaded = false;
               videosWatchedRef.current = 0;
+              AsyncStorage.setItem(STORAGE_KEY, '0').catch(() => {});
             })
             .catch((e: any) => {
               console.error('❌ Error showing ad:', e);
@@ -147,9 +178,20 @@ export const useAdManager = (isPremium: boolean = false) => {
               AsyncStorage.setItem(STORAGE_KEY, '0').catch(() => {});
             });
         } else {
-          console.log('⚠️ Ad not ready, resetting counter');
+          console.log('⚠️ Ad not ready:');
+          console.log(`   - moduleAdLoaded: ${moduleAdLoaded}`);
+          console.log(`   - moduleAd exists: ${!!moduleAd}`);
+          console.log(`   - AdMob initialized: ${moduleAdMobInitialized}`);
           videosWatchedRef.current = 0;
           AsyncStorage.setItem(STORAGE_KEY, '0').catch(() => {});
+
+          if (moduleAdMobInitialized && moduleAd && !moduleAdLoaded) {
+            console.log('🔄 Attempting ad reload...');
+            moduleAd.load();
+          } else if (moduleAdMobInitialized && !moduleAd) {
+            console.log('🔄 Attempting ad recreation...');
+            createAd();
+          }
         }
       }
     } catch (e) {

@@ -750,6 +750,47 @@ export default function SettingsScreen() {
           )}
         </View>
 
+{/* PRIVACY & ADS SECTION */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>PRIVACY & ADS</Text>
+
+          <Pressable
+            style={styles.menuItem}
+            onPress={async () => {
+  try {
+    const { AdsConsent } = await import('react-native-google-mobile-ads').then(m => m);
+    const info = await AdsConsent.getConsentInfo();
+    if (info.isConsentFormAvailable) {
+      await AdsConsent.showForm();
+    } else {
+      Linking.openURL('https://popnow.world/privacy');
+    }
+  } catch (e) {
+    Linking.openURL('https://popnow.world/privacy');
+  }
+}}
+          >
+            <View style={styles.menuItemLeft}>
+              <IconSymbol
+                ios_icon_name="hand.raised.fill"
+                android_material_icon_name="privacy-tip"
+                size={20}
+                color={colors.text}
+              />
+              <Text style={styles.menuItemText}>Manage Ad Preferences</Text>
+            </View>
+            <IconSymbol
+              ios_icon_name="chevron.right"
+              android_material_icon_name="chevron-right"
+              size={20}
+              color={colors.textSecondary}
+            />
+          </Pressable>
+          <Text style={styles.premiumExpiry}>
+            Update your consent for personalised ads at any time
+          </Text>
+        </View>
+
         {/* LOCATION ACCESS SECTION */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>LOCATION</Text>
@@ -927,7 +968,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
-    paddingBottom: 100,
+    paddingBottom: 130,
   },
   loadingContainer: {
     flex: 1,
