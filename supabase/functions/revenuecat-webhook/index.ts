@@ -66,8 +66,8 @@ Deno.serve(async (req) => {
     });
   }
 
-  const eventType: string | undefined = body?.type;
   const rcEvent = body?.event ?? {};
+  const eventType: string | undefined = rcEvent.type;
   const eventId: string | undefined = rcEvent.id;
   const appUserId: string | undefined = rcEvent.app_user_id;
 
