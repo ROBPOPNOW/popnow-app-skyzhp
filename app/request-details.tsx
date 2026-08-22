@@ -99,9 +99,9 @@ const { count: totalCount } = await supabase
 
 setFulfillmentCount(totalCount || 0);
 
-// Get live fulfillments (videos within 1 hour)
-const oneHourAgo = new Date();
-oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+// Get live fulfillments (videos within 24 hours)
+const twentyFourHoursAgo = new Date();
+twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
 
 const { data: fulfillments } = await supabase
   .from('request_fulfillments')
@@ -111,13 +111,13 @@ const { data: fulfillments } = await supabase
 if (fulfillments && fulfillments.length > 0) {
   const videoIds = fulfillments.map(f => f.video_id);
   
-  // Count how many of these videos are still live (within 1 hour)
+  // Count how many of these videos are still live (within 24 hours)
   const { count: liveCount } = await supabase
     .from('videos')
     .select('*', { count: 'exact', head: true })
     .in('id', videoIds)
     .eq('moderation_status', 'approved')
-    .gte('created_at', oneHourAgo.toISOString());
+    .gte('created_at', twentyFourHoursAgo.toISOString());
   
   setLiveFulfillmentCount(liveCount || 0);
   console.log(`📊 Fulfillments: ${liveCount} live / ${totalCount} total`);

@@ -141,7 +141,7 @@ const { data, error } = await supabase
   return;
 }
 
-// Filter out expired videos (older than 1 hour) ONLY if they're not owned by current user
+// Filter out expired videos (older than 24 hours) ONLY if they're not owned by current user
 const twentyFourHoursAgo = new Date();
 twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
 
