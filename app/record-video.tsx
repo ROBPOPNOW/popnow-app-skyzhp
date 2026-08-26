@@ -158,7 +158,18 @@ export default function RecordVideoScreen() {
         }
 
         console.log('Video recorded:', video.uri);
-        
+
+        // Validate the recording actually has bytes before handing it to the upload flow —
+        // catches truncated/empty files (storage pressure, interrupted writes) here instead
+        // of after a phantom Bunny object gets created.
+        const recordedFileInfo = await FileSystem.getInfoAsync(video.uri);
+        if (!recordedFileInfo.exists || !recordedFileInfo.size) {
+          console.error('❌ Recorded video file is empty or missing:', video.uri);
+          Alert.alert('Recording Failed', 'The video file is empty or could not be saved. Please try recording again.');
+          setIsRecording(false);
+          return;
+        }
+
         // Navigate to upload screen with video
         router.replace({
           pathname: '/upload',

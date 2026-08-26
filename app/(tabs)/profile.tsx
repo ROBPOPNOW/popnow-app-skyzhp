@@ -428,6 +428,11 @@ const loadPendingUploadsInBackground = async () => {
 };
 
 const handleRetryUpload = async (upload: any) => {
+  // Hoisted out of the try block so the catch block can clean up a Bunny object
+  // this attempt created, and know which library it was created in.
+  let bunnyVideoId: string | null = null;
+  let isPremium = false;
+
   try {
     console.log('🔄 Retrying failed upload:', upload.id);
 
@@ -453,7 +458,7 @@ const handleRetryUpload = async (upload: any) => {
       .eq('id', user.id)
       .single();
 
-    const isPremium = userData?.is_premium || false;
+    isPremium = userData?.is_premium || false;
 
     // Check if the original video file still exists
     const fileInfo = await FileSystem.getInfoAsync(upload.video_uri);
@@ -515,8 +520,6 @@ const handleRetryUpload = async (upload: any) => {
 
     // Dynamically import bunnynet utils and restart upload
     const bunnynet = await import('@/utils/bunnynet');
-
-    let bunnyVideoId: string | null = null;
 
     if (USE_TUS_UPLOAD) {
       // ── NEW: key-free TUS path (utils/bunnynet.ts → uploadVideoViaTus) ──
@@ -644,13 +647,30 @@ const handleRetryUpload = async (upload: any) => {
   } catch (error: any) {
     console.error('❌ Retry failed:', error);
     retryInProgressRef.current = false;
+
+    // Clean up any Bunny object this attempt created before failing, so the next retry
+    // starts clean instead of orphaning another phantom video.
+    if (bunnyVideoId) {
+      try {
+        if (USE_EDGE_DELETE) {
+          await getDeleteVideoViaEdgeFunction(bunnyVideoId, isPremium);
+        } else {
+          await deleteStreamVideo(bunnyVideoId, isPremium);
+        }
+        console.log('✅ Cleaned up Bunny video after failed retry:', bunnyVideoId);
+      } catch (deleteError) {
+        console.error('⚠️ Failed to clean up Bunny video after failed retry:', deleteError);
+      }
+    }
+
     // Mark as failed again
     await supabase
       .from('pending_uploads')
-      .update({ 
+      .update({
         status: 'failed',
         upload_progress: 0,
         error_message: error.message,
+        bunny_video_id: null,
       })
       .eq('id', upload.id);
     loadPendingUploads();

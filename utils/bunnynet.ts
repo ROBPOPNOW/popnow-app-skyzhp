@@ -271,6 +271,13 @@ export async function uploadVideoViaTus(
 ): Promise<TusUploadResult> {
   const { isPremium = false, collectionId, mimeType = 'video/mp4', onVideoCreated, onProgress } = options;
 
+  // Validate the local file BEFORE creating anything on Bunny — a missing/empty recording
+  // must fail honestly here instead of producing a phantom 0-byte Bunny video object.
+  const localFileInfo = await FileSystem.getInfoAsync(videoUri);
+  if (!localFileInfo.exists || !localFileInfo.size) {
+    throw new Error('Recording file is empty or missing — please re-record.');
+  }
+
   // Step 1: create the video server-side and get a short-lived TUS upload token
   console.log('🎬 [TUS] Calling bunny-create-video edge function...');
   const { data: createData, error: createError } = await supabase.functions.invoke(
@@ -294,6 +301,9 @@ export async function uploadVideoViaTus(
   // Step 2: create the TUS upload resource on Bunny
   const file = new File(videoUri);
   const fileSize = file.size;
+  if (!fileSize) {
+    throw new Error('Recording file is empty or missing — please re-record.');
+  }
 
   console.log('📤 [TUS] Creating TUS upload resource on Bunny...');
   const uploadMetadata = buildTusUploadMetadata({ filetype: mimeType, title });
