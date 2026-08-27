@@ -686,20 +686,37 @@ const proceedWithUpload = async () => {
       let processed = false;
       let attempts = 0;
       const maxAttempts = 120;
+      // Hard wall-clock cap on top of maxAttempts: individual poll timeouts (see
+      // getVideoStatus/getVideoStatusViaEdgeFunction) retry rather than kill the upload, so
+      // without this a run of stalled polls could stretch attempts-based pacing well past the
+      // intended ~4 minutes. This bounds the worst case regardless of how many polls stall.
+      const pollDeadline = Date.now() + 4 * 60 * 1000;
 
-      while (!processed && attempts < maxAttempts) {
+      while (!processed && attempts < maxAttempts && Date.now() < pollDeadline) {
         await new Promise(resolve => setTimeout(resolve, 2000));
-        const status = USE_EDGE_STATUS_CHECK
-          ? await getVideoStatusViaEdgeFunction(bunnyVideoId, isPremium)
-          : await getVideoStatus(bunnyVideoId, isPremium);
 
+        // A failed/timed-out poll is NOT a failed upload — the bytes are already on Bunny and
+        // are still transcoding. Just retry next tick; only a real status===5/6 answer from
+        // Bunny, or running out of attempts/deadline, ends the upload.
+        let status: any = null;
+        try {
+          status = USE_EDGE_STATUS_CHECK
+            ? await getVideoStatusViaEdgeFunction(bunnyVideoId, isPremium)
+            : await getVideoStatus(bunnyVideoId, isPremium);
+        } catch (pollError: any) {
+          console.warn(`⚠️ Status poll attempt ${attempts + 1}/${maxAttempts} failed (will retry): ${pollError.message}`);
+        }
+
+        attempts++;
         const processingProgress = 60 + Math.min(attempts * 1, 30);
         await supabase
           .from('pending_uploads')
           .update({ upload_progress: processingProgress, updated_at: new Date().toISOString() })
           .eq('id', pendingUploadId);
-        
-        console.log(`⏳ Attempt ${attempts + 1}/${maxAttempts} - Bunny status: ${status.status}`);
+
+        if (!status) continue;
+
+        console.log(`⏳ Attempt ${attempts}/${maxAttempts} - Bunny status: ${status.status}`);
         if (status.status === 4) {
           processed = true;
           console.log('✅ Video processing complete');
@@ -707,11 +724,10 @@ const proceedWithUpload = async () => {
           console.log('❌ Video processing failed on Bunny.net, status:', status.status);
           throw new Error('Video processing failed on Bunny.net');
         }
-        attempts++;
       }
 
       if (!processed) {
-        throw new Error('Video processing timeout - please try again');
+        throw new Error('Video processing timed out after 4 minutes — please try again');
       }
 
       // Update progress: 95% - Saving to database
@@ -847,7 +863,7 @@ if (reqId) {
       console.error('❌ Upload failed:', error.message);
       
       // Clean up failed upload
-      await cleanupFailedUpload(pendingUploadId, bunnyVideoId, videoRecordId, isPremium);
+      await cleanupFailedUpload(pendingUploadId, bunnyVideoId, videoRecordId, isPremium, error.message);
     } finally {
       // Reset upload flags
       uploadInProgressRef.current = false;
@@ -864,7 +880,8 @@ if (reqId) {
     pendingUploadId: string,
     bunnyVideoId: string | null,
     videoRecordId: string | null,
-    isPremium: boolean = false
+    isPremium: boolean = false,
+    errorMessage?: string
   ) => {
     console.log('🧹 === CLEANING UP FAILED/CANCELLED UPLOAD ===');
     console.log('  - Pending Upload ID:', pendingUploadId);
@@ -926,7 +943,7 @@ if (pendingUploadId) {
       .update({ 
         status: 'failed',
         upload_progress: 0,
-        error_message: 'Upload failed. Tap retry to try again.',
+        error_message: errorMessage || 'Upload failed. Tap retry to try again.',
       })
       .eq('id', pendingUploadId);
 

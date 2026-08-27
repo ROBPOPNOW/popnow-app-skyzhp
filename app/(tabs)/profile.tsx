@@ -265,6 +265,15 @@ useEffect(() => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user || !mounted) return;
 
+    // Guard against a stale channel from a previous run of this effect that hasn't
+    // finished unsubscribing yet — supabase.channel() would otherwise hand back that
+    // already-joined instance, and .on() on it throws ("...after subscribe()").
+    const existing = supabase.getChannels().find(c => c.topic === 'realtime:pending-videos-changes');
+    if (existing) {
+      await supabase.removeChannel(existing);
+    }
+    if (!mounted) return; // unmounted while we were awaiting removal
+
     subscription = supabase
       .channel('pending-videos-changes')
       .on(
@@ -571,16 +580,26 @@ const handleRetryUpload = async (upload: any) => {
     // Step 3: Wait for processing
     let processed = false;
     let attempts = 0;
-    while (!processed && attempts < 120) {
+    const maxAttempts = 120;
+    // Hard wall-clock cap on top of maxAttempts — see the identical poll loop in upload.tsx
+    // for why: individual poll timeouts retry rather than kill the upload, so this bounds the
+    // worst case (a run of stalled polls) to ~4 minutes regardless of attempt count.
+    const pollDeadline = Date.now() + 4 * 60 * 1000;
+
+    while (!processed && attempts < maxAttempts && Date.now() < pollDeadline) {
       await new Promise(resolve => setTimeout(resolve, 2000));
-      const status = USE_EDGE_STATUS_CHECK
-        ? await bunnynet.getVideoStatusViaEdgeFunction(bunnyVideoId, isPremium)
-        : await bunnynet.getVideoStatus(bunnyVideoId, isPremium);
-      if (status.status === 4) {
-        processed = true;
-      } else if (status.status === 5 || status.status === 6) {
-        throw new Error('Video processing failed on Bunny.net');
+
+      // A failed/timed-out poll is NOT a failed upload — retry next tick. Only a real
+      // status===5/6 answer from Bunny, or running out of attempts/deadline, ends the retry.
+      let status: any = null;
+      try {
+        status = USE_EDGE_STATUS_CHECK
+          ? await bunnynet.getVideoStatusViaEdgeFunction(bunnyVideoId, isPremium)
+          : await bunnynet.getVideoStatus(bunnyVideoId, isPremium);
+      } catch (pollError: any) {
+        console.warn(`⚠️ Status poll attempt ${attempts + 1}/${maxAttempts} failed (will retry): ${pollError.message}`);
       }
+
       attempts++;
       const processingPct = Math.min(60 + attempts, 90);
       setPendingUploads(prev => prev.map(p =>
@@ -592,9 +611,17 @@ const handleRetryUpload = async (upload: any) => {
         .from('pending_uploads')
         .update({ upload_progress: processingPct, updated_at: new Date().toISOString() })
         .eq('id', upload.id);
+
+      if (!status) continue;
+
+      if (status.status === 4) {
+        processed = true;
+      } else if (status.status === 5 || status.status === 6) {
+        throw new Error('Video processing failed on Bunny.net');
+      }
     }
 
-    if (!processed) throw new Error('Processing timeout');
+    if (!processed) throw new Error('Video processing timed out after 4 minutes — please try again');
 
     // Step 4: Save to database
     await supabase

@@ -234,10 +234,35 @@ export async function uploadToStream(
 const TUS_CREATE_URL = 'https://video.bunnycdn.com/tusupload';
 const TUS_CHUNK_SIZE = 5 * 1024 * 1024; // 5MB per PATCH — same as the proven spike
 
+// Timeouts — none of these existed before, which is how a single stalled request could hang
+// an upload forever with no error and no way for the poll loop to recover. Values are generous
+// headroom over normal latency, not tight SLAs:
+const TUS_CHUNK_TIMEOUT_MS = 45_000; // 5MB at ~1Mbps (a slow-but-real connection) takes ~40s
+const STATUS_CHECK_TIMEOUT_MS = 15_000; // direct Bunny status GET — normally sub-second
+const STATUS_CHECK_EDGE_TIMEOUT_MS = 20_000; // via bunny-video-status edge fn — one extra hop
+
 function buildTusUploadMetadata(pairs: Record<string, string>): string {
   return Object.entries(pairs)
     .map(([key, value]) => `${key} ${btoa(value)}`)
     .join(',');
+}
+
+/**
+ * Races `promise` against a timeout. For calls that expose a real AbortSignal (any fetch()),
+ * prefer wiring an AbortController directly — that actually cancels the in-flight request.
+ * This is for calls that don't (e.g. supabase.functions.invoke), where we can only stop waiting,
+ * not cancel the underlying request.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timeoutId!: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 export interface TusUploadResult {
@@ -356,19 +381,32 @@ export async function uploadVideoViaTus(
       // Libraries/Utilities/binaryToBase64.js): a Uint8Array is base64-encoded respecting
       // its own byteOffset/length, a raw ArrayBuffer is encoded whole with no trimming.
       // Uint8Array is the byte-exact option here.
-      const patchResponse = await fetch(location, {
-        method: 'PATCH',
-        headers: {
-          'Tus-Resumable': '1.0.0',
-          'Upload-Offset': String(offset),
-          'Content-Type': 'application/offset+octet-stream',
-          'LibraryId': String(libraryId),
-          'VideoId': videoId,
-          'AuthorizationSignature': authorizationSignature,
-          'AuthorizationExpire': String(authorizationExpire),
-        },
-        body: chunk,
-      });
+      const patchController = new AbortController();
+      const patchTimeoutId = setTimeout(() => patchController.abort(), TUS_CHUNK_TIMEOUT_MS);
+      let patchResponse: Response;
+      try {
+        patchResponse = await fetch(location, {
+          method: 'PATCH',
+          headers: {
+            'Tus-Resumable': '1.0.0',
+            'Upload-Offset': String(offset),
+            'Content-Type': 'application/offset+octet-stream',
+            'LibraryId': String(libraryId),
+            'VideoId': videoId,
+            'AuthorizationSignature': authorizationSignature,
+            'AuthorizationExpire': String(authorizationExpire),
+          },
+          body: chunk,
+          signal: patchController.signal,
+        });
+      } catch (patchFetchError: any) {
+        if (patchFetchError.name === 'AbortError') {
+          throw new Error(`PATCH timed out at offset ${offset} after ${TUS_CHUNK_TIMEOUT_MS / 1000}s`);
+        }
+        throw patchFetchError;
+      } finally {
+        clearTimeout(patchTimeoutId);
+      }
 
       if (!patchResponse.ok) {
         const errText = await patchResponse.text();
@@ -426,12 +464,25 @@ export async function getVideoStatus(videoId: string, isPremium: boolean = false
     const cleanVideoId = videoId.split('/').pop()?.split('?')[0] || videoId;
     const statusUrl = `https://video.bunnycdn.com/library/${libraryId}/videos/${cleanVideoId}`;
 
-    const response = await fetch(statusUrl, {
-      method: 'GET',
-      headers: {
-        'AccessKey': apiKey,
-      },
-    });
+    const statusController = new AbortController();
+    const statusTimeoutId = setTimeout(() => statusController.abort(), STATUS_CHECK_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(statusUrl, {
+        method: 'GET',
+        headers: {
+          'AccessKey': apiKey,
+        },
+        signal: statusController.signal,
+      });
+    } catch (fetchError: any) {
+      if (fetchError.name === 'AbortError') {
+        throw new Error(`Bunny status check timed out after ${STATUS_CHECK_TIMEOUT_MS / 1000}s`);
+      }
+      throw fetchError;
+    } finally {
+      clearTimeout(statusTimeoutId);
+    }
 
     if (!response.ok) {
       throw new Error(`Failed to get video status: ${response.status}`);
@@ -453,9 +504,13 @@ export async function getVideoStatus(videoId: string, isPremium: boolean = false
  */
 export async function getVideoStatusViaEdgeFunction(videoId: string, isPremium: boolean = false): Promise<any> {
   try {
-    const { data, error } = await supabase.functions.invoke('bunny-video-status', {
-      body: { videoId, isPremium },
-    });
+    const { data, error } = await withTimeout(
+      supabase.functions.invoke('bunny-video-status', {
+        body: { videoId, isPremium },
+      }),
+      STATUS_CHECK_EDGE_TIMEOUT_MS,
+      'bunny-video-status'
+    );
 
     if (error) {
       throw new Error(`bunny-video-status failed: ${error.message}`);

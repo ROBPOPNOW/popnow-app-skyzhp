@@ -56,10 +56,27 @@ Deno.serve(async (req) => {
       );
     }
 
-    const statusResponse = await fetch(
-      `https://video.bunnycdn.com/library/${libraryId}/videos/${videoId}`,
-      { method: 'GET', headers: { AccessKey: apiKey } }
-    );
+    // 10s — tighter than the client's own 20s wait for this function, so a stalled call to
+    // Bunny surfaces here as a clean error response instead of the client timing out first.
+    const BUNNY_FETCH_TIMEOUT_MS = 10_000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), BUNNY_FETCH_TIMEOUT_MS);
+    let statusResponse: Response;
+    try {
+      statusResponse = await fetch(
+        `https://video.bunnycdn.com/library/${libraryId}/videos/${videoId}`,
+        { method: 'GET', headers: { AccessKey: apiKey }, signal: controller.signal }
+      );
+    } catch (fetchError) {
+      const isTimeout = fetchError instanceof Error && fetchError.name === 'AbortError';
+      console.error(isTimeout ? '❌ Bunny status check timed out' : '❌ Bunny status check errored:', fetchError);
+      return new Response(
+        JSON.stringify({ error: isTimeout ? `Bunny status check timed out after ${BUNNY_FETCH_TIMEOUT_MS / 1000}s` : 'Failed to reach Bunny.net' }),
+        { status: 504, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (!statusResponse.ok) {
       console.error('❌ Bunny status check failed:', statusResponse.status);
