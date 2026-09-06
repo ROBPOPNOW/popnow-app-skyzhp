@@ -1,0 +1,22 @@
+-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+-- pending_uploads.caption: drop NOT NULL
+--
+-- Part of the Tier 1 upload rebuild (pre-upload while editing, gated
+-- behind USE_PREUPLOAD in config/uploadFlags.ts, currently false).
+-- The new flow inserts a pending_uploads row as soon as the video file
+-- exists, before the user has typed a caption — that only becomes known
+-- at "Post" time, via a later UPDATE to the same row. Left NOT NULL,
+-- that early insert would fail. Nullable (not defaulted to '') so "no
+-- caption yet" stays distinguishable from "posted with an empty caption".
+--
+-- No CHECK constraint or trigger references this column. All existing
+-- rows already have non-null captions, so this is a pure constraint
+-- relaxation with no data impact. Already applied directly against the
+-- live database on 2026-09-05 via `supabase db query --linked` (verified:
+-- is_nullable = YES, row count unchanged at 60, 0 null captions); this
+-- file exists only as the repo record of that change, per this project's
+-- convention that migrations don't reliably reflect live DB state and
+-- must be verified/applied separately.
+-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ALTER TABLE pending_uploads ALTER COLUMN caption DROP NOT NULL;

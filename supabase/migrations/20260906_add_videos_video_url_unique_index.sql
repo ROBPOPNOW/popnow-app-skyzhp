@@ -1,0 +1,25 @@
+-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+-- videos.video_url: unique index
+--
+-- Part of the Tier 1 upload rebuild's server-side webhook finalizer
+-- (bunny-webhook-finalize). video_url stores the Bunny video GUID, and
+-- Bunny's "video finished encoding" webhook has no documented delivery
+-- guarantee against duplicates/retries. The finalizer already checks
+-- "does a videos row for this GUID already exist" before inserting
+-- (app-level idempotency), but that check-then-insert has a narrow race
+-- window if two deliveries are processed truly concurrently. This unique
+-- index closes that window at the DB level: a concurrent duplicate insert
+-- gets a 23505 unique-violation instead of a second videos row, which the
+-- finalizer catches and treats as "already finalized by the other request".
+--
+-- Confirmed zero duplicate video_url values in the live table before
+-- adding (and only 2 rows total), so this is a safe, instant addition
+-- with no data impact.
+--
+-- Already applied directly against the live database on 2026-09-06 via
+-- `supabase db query --linked` (verified: videos_video_url_key exists);
+-- this file is the repo record only, per this project's convention that
+-- migrations don't reliably reflect live DB state.
+-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CREATE UNIQUE INDEX videos_video_url_key ON public.videos (video_url);
