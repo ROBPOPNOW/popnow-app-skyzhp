@@ -18,6 +18,8 @@ import { IconSymbol } from '@/components/IconSymbol';
 import { supabase } from '@/lib/supabase';
 import { colors } from '@/styles/commonStyles';
 import { router, useLocalSearchParams } from 'expo-router';
+import { useNavigation, usePreventRemove } from '@react-navigation/native';
+import type { NavigationAction } from '@react-navigation/routers';
 import * as Location from 'expo-location';
 import { checkUploadLimit } from '@/services/premiumLimitsService';
 import {
@@ -32,12 +34,19 @@ import {
   getVideoThumbnailUrl,
 } from '@/utils/bunnynet';
 import Constants from 'expo-constants';
-import { USE_TUS_UPLOAD, USE_EDGE_STATUS_CHECK, USE_EDGE_DELETE } from '@/config/uploadFlags';
+import * as FileSystem from 'expo-file-system/legacy';
+import { USE_TUS_UPLOAD, USE_EDGE_STATUS_CHECK, USE_EDGE_DELETE, USE_PREUPLOAD } from '@/config/uploadFlags';
 
 type LocationPrivacy = 'exact' | '3km' | '10km';
 
 const MAX_HASHTAGS = 8;
 const MAX_TAG_LENGTH = 20;
+
+// Tier 1 background pre-upload (behind USE_PREUPLOAD) — same pattern proven in the
+// dev-preupload-test.tsx prototype.
+const SUPABASE_URL = Constants.expoConfig?.extra?.EXPO_PUBLIC_SUPABASE_URL || '';
+const SUPABASE_ANON_KEY = Constants.expoConfig?.extra?.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
+const PREUPLOAD_PROXY_URL = `${SUPABASE_URL}/functions/v1/bunny-upload-proxy`;
 
 export default function UploadScreen() {
   const params = useLocalSearchParams();
@@ -66,6 +75,77 @@ export default function UploadScreen() {
   const videoUriRef = useRef<string | null>(null); // Track which video is being uploaded
   const lastUploadAttemptRef = useRef<number>(0); // Debouncing timestamp
 
+  // Tier 1 background pre-upload (behind USE_PREUPLOAD) — distinct from the refs above,
+  // which track the legacy Post-time JS upload. These track the silent background upload
+  // that starts the moment the edit screen mounts, before Post is ever tapped.
+  const hasStartedPreuploadRef = useRef(false); // once-only guard — set synchronously, before any await
+  const preuploadTaskRef = useRef<FileSystem.UploadTask | null>(null); // for cancelAsync() on back-arrow discard
+  const preuploadBunnyVideoIdRef = useRef<string | null>(null);
+  const preuploadPendingUploadIdRef = useRef<string | null>(null);
+  const preuploadIsPremiumRef = useRef(false); // so the discard handler doesn't need to re-query is_premium
+  const isDiscardingRef = useRef(false); // re-entrancy guard — a second exit attempt while cleanup is mid-flight is a no-op
+  // Step 2 (Post handler) will flip this true on a successful Post — gates the discard
+  // confirmation off once the user has committed, per the state model ('interrupted' is
+  // only ever reachable from 'posted', never a reason to discard-on-exit again here).
+  const [hasPosted, setHasPosted] = useState(false);
+
+  const navigation = useNavigation();
+
+  // Abandon-with-confirmation (Step 3): usePreventRemove intercepts the navigator's
+  // beforeRemove event, which fires for ANY action that removes this screen's route —
+  // back arrow, Android hardware/gesture back, iOS edge-swipe, and "Record Again"'s
+  // router.replace() all dispatch actions that qualify, so this single hook covers all
+  // of them uniformly. No-op when USE_PREUPLOAD is off or once hasPosted is true.
+  usePreventRemove(USE_PREUPLOAD && !hasPosted, ({ data: { action } }) => {
+    Alert.alert(
+      'Discard video?',
+      'Are you sure you want to go back? Your recorded video will be lost.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Discard', style: 'destructive', onPress: () => handleDiscardAndLeave(action) },
+      ]
+    );
+  });
+
+  const handleDiscardAndLeave = async (action: NavigationAction) => {
+    if (isDiscardingRef.current) return; // double-tap / re-entrancy guard
+    isDiscardingRef.current = true;
+
+    try {
+      if (preuploadTaskRef.current) {
+        try {
+          await preuploadTaskRef.current.cancelAsync();
+        } catch (cancelError) {
+          console.error('⚠️ [preupload] cancelAsync failed (continuing cleanup anyway):', cancelError);
+        }
+      }
+
+      if (preuploadBunnyVideoIdRef.current) {
+        await cleanupBunnyVideo(preuploadBunnyVideoIdRef.current, preuploadIsPremiumRef.current);
+      }
+
+      if (preuploadPendingUploadIdRef.current) {
+        const { error: deleteRowError } = await supabase
+          .from('pending_uploads')
+          .delete()
+          .eq('id', preuploadPendingUploadIdRef.current);
+        if (deleteRowError) {
+          console.error('⚠️ [preupload] failed to delete pending_uploads row on discard:', deleteRowError);
+        }
+      }
+    } finally {
+      preuploadTaskRef.current = null;
+      preuploadBunnyVideoIdRef.current = null;
+      preuploadPendingUploadIdRef.current = null;
+      // Replay the EXACT action object the callback received — it already carries
+      // React Navigation's own VISITED_ROUTE_KEYS marker for this route, so dispatching
+      // it again does not re-trigger usePreventRemove's listener for this screen (no
+      // loop, no re-prompt). A freshly-constructed action here would NOT have that
+      // marker and would re-show the confirmation.
+      navigation.dispatch(action);
+    }
+  };
+
   useEffect(() => {
     initializeScreen();
   }, [requestDescription, videoUri]);
@@ -82,6 +162,17 @@ export default function UploadScreen() {
 
     // Store the video URI for duplicate detection
     videoUriRef.current = videoUri;
+
+    // 🆕 Tier 1 background pre-upload (behind USE_PREUPLOAD) — fire-and-forget, must run
+    // BEFORE the location-permission check below since byte-upload doesn't depend on
+    // location at all; gating it behind that check would silently skip pre-upload for
+    // any user who denies location. Guard is set synchronously, before any await, so a
+    // re-entrant initializeScreen call (StrictMode double-invoke, effect re-firing) can
+    // never start a second Bunny video for the same recording.
+    if (USE_PREUPLOAD && !hasStartedPreuploadRef.current) {
+      hasStartedPreuploadRef.current = true;
+      startPreupload(videoUri, requestId).catch((err) => console.error('❌ [preupload] unhandled error:', err));
+    }
 
     // 📍 CHECK LOCATION PERMISSION FIRST
     const { status } = await Location.getForegroundPermissionsAsync();
@@ -114,6 +205,171 @@ export default function UploadScreen() {
     }
 
     setIsLoading(false);
+  };
+
+  // Deletes a Bunny video object, reusing the same USE_EDGE_DELETE-gated helper the
+  // legacy flow's cleanupFailedUpload/handleRetryUpload already use — no new deletion
+  // logic, just a thin wrapper for the pre-upload trigger's own cleanup paths.
+  const cleanupBunnyVideo = async (bunnyVideoId: string, isPremium: boolean) => {
+    try {
+      if (USE_EDGE_DELETE) {
+        await getDeleteVideoViaEdgeFunction(bunnyVideoId, isPremium);
+      } else {
+        await deleteStreamVideo(bunnyVideoId, isPremium);
+      }
+      console.log('✅ [preupload] cleaned up Bunny video:', bunnyVideoId);
+    } catch (deleteError) {
+      console.error('⚠️ [preupload] failed to clean up Bunny video:', bunnyVideoId, deleteError);
+    }
+  };
+
+  // Tier 1 background pre-upload (behind USE_PREUPLOAD). Runs silently from the moment
+  // the edit screen mounts, well before the user taps Post — caption/tags/location are
+  // unknown at this point (pending_uploads.caption is inserted null), which is exactly
+  // the row shape the Phase 1 webhook finalizer and the caption-nullable migration were
+  // built for. Fire-and-forget: never blocks initializeScreen's own loading state.
+  const startPreupload = async (uri: string, reqId?: string) => {
+    let bunnyVideoId: string | null = null;
+    let pendingUploadId: string | null = null;
+    let isPremium = false;
+
+    try {
+      // Step 1: premium status — needed for library selection (X-Bunny-Is-Premium header)
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        console.error('❌ [preupload] no authenticated user, aborting');
+        return;
+      }
+
+      const { data: userData } = await supabase
+        .from('users')
+        .select('is_premium')
+        .eq('id', user.id)
+        .single();
+
+      isPremium = userData?.is_premium || false;
+      preuploadIsPremiumRef.current = isPremium;
+      console.log('🚀 [preupload] starting for', uri, isPremium ? '(Premium)' : '(Free)');
+
+      // Step 2: create the Bunny video, get the GUID (matches bunny-create-video's
+      // response shape used by the live TUS flow: { videoId, libraryId, ... })
+      const { data: createData, error: createError } = await supabase.functions.invoke('bunny-create-video', {
+        body: { title: `preupload-${Date.now()}`, isPremium },
+      });
+
+      if (createError || !createData?.videoId) {
+        console.error('❌ [preupload] bunny-create-video failed:', createError || createData);
+        return; // nothing created yet — nothing to clean up
+      }
+
+      bunnyVideoId = createData.videoId;
+      preuploadBunnyVideoIdRef.current = bunnyVideoId;
+      console.log('✅ [preupload] Bunny video created:', bunnyVideoId);
+
+      // Step 3: insert the pending_uploads row — caption null, status 'uploading'.
+      // Invisible on the pending tab (caption IS NOT NULL filter) until Post attaches
+      // real metadata and flips status to 'posted'.
+      const { data: pendingRow, error: insertError } = await supabase
+        .from('pending_uploads')
+        .insert({
+          user_id: user.id,
+          video_uri: uri,
+          caption: null,
+          bunny_video_id: bunnyVideoId,
+          status: 'uploading',
+          upload_progress: 0,
+          request_id: reqId || null,
+        })
+        .select()
+        .single();
+
+      if (insertError || !pendingRow) {
+        console.error('❌ [preupload] pending_uploads insert failed:', insertError);
+        // Bunny video WAS created — active cleanup, nothing else exists yet to undo.
+        await cleanupBunnyVideo(bunnyVideoId!, isPremium);
+        preuploadBunnyVideoIdRef.current = null;
+        return;
+      }
+
+      pendingUploadId = pendingRow.id;
+      preuploadPendingUploadIdRef.current = pendingUploadId;
+      console.log('✅ [preupload] pending_uploads row inserted:', pendingUploadId);
+
+      // Step 4: start the background upload via the proxy.
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        console.error('❌ [preupload] no active session token, aborting');
+        await cleanupBunnyVideo(bunnyVideoId!, isPremium);
+        await supabase.from('pending_uploads').delete().eq('id', pendingUploadId!);
+        preuploadBunnyVideoIdRef.current = null;
+        preuploadPendingUploadIdRef.current = null;
+        return;
+      }
+
+      const task = FileSystem.createUploadTask(
+        PREUPLOAD_PROXY_URL,
+        uri,
+        {
+          httpMethod: 'POST',
+          uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+          sessionType: FileSystem.FileSystemSessionType.BACKGROUND,
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+            apikey: SUPABASE_ANON_KEY,
+            'X-Bunny-Video-Guid': bunnyVideoId!,
+            'X-Bunny-Is-Premium': isPremium ? 'true' : 'false',
+          },
+        },
+        (_progressData) => {
+          // Step 5: optional progress indicator — not wired to UI state yet.
+        }
+      );
+      preuploadTaskRef.current = task;
+
+      console.log('📤 [preupload] background upload starting for', bunnyVideoId);
+      const result = await task.uploadAsync();
+
+      // Note: if the app is backgrounded/killed and this JS instance never resumes,
+      // this await simply never settles here — that's expected. The webhook finalizer
+      // and reconciliation cron are the source of truth for completion, not this promise.
+      if (isDiscardingRef.current) {
+        // cancelAsync() (called by handleDiscardAndLeave) surfaced here as a falsy/non-200
+        // result, not a thrown exception. This is the EXPECTED effect of a user-initiated
+        // discard, not a real failure — handleDiscardAndLeave already owns cleanup for
+        // this row/video (and may have already deleted them by the time this settles), so
+        // log calmly and touch nothing.
+        console.log('ℹ️ [preupload] upload cancelled by user discard for', bunnyVideoId);
+      } else if (!result || result.status !== 200) {
+        console.error('❌ [preupload] upload failed:', result?.status, result?.body);
+        // PASSIVE — deliberately no cleanup here. A pre-Post failure is silent abandon
+        // per the state model: the row stays 'uploading' and is resolved either by the
+        // user's own back-arrow discard or the 3-hour reconciliation cron, never by an
+        // active delete triggered from a possibly-spurious upload rejection.
+      } else {
+        console.log('✅ [preupload] upload complete for', bunnyVideoId);
+      }
+    } catch (error) {
+      if (isDiscardingRef.current) {
+        // Same reasoning as above, in case cancellation surfaces as a thrown exception
+        // instead of a falsy result on some platform. handleDiscardAndLeave already owns
+        // cleanup for this row/video — running it again here would be redundant (Bunny's
+        // own delete endpoint treats a repeat delete as a no-op 404), so just log and stop.
+        console.log('ℹ️ [preupload] upload cancelled by user discard (via exception) for', bunnyVideoId);
+        return;
+      }
+      console.error('❌ [preupload] exception:', error);
+      // Exception after the row existed — active cleanup, same as the insert-failure path.
+      if (pendingUploadId) {
+        if (bunnyVideoId) await cleanupBunnyVideo(bunnyVideoId, isPremium);
+        const { error: deleteRowError } = await supabase.from('pending_uploads').delete().eq('id', pendingUploadId);
+        if (deleteRowError) console.error('⚠️ [preupload] failed to delete pending_uploads row during cleanup:', deleteRowError);
+      } else if (bunnyVideoId) {
+        // Exception after the Bunny video existed but before the row — Bunny-only cleanup.
+        await cleanupBunnyVideo(bunnyVideoId, isPremium);
+      }
+      preuploadBunnyVideoIdRef.current = null;
+      preuploadPendingUploadIdRef.current = null;
+    }
   };
 
   const getCurrentLocation = async () => {

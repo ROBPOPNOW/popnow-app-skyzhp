@@ -580,6 +580,7 @@ if (session?.user?.id) {
 
   const hideTabBarRoutes = [
     '/record-video',
+    '/upload', // also removes the tab-bar-tap escape hatch that today bypasses the back button's disabled={isUploading} guard mid-Post
     '/login',
     '/edit-profile',
     '/reset-password',

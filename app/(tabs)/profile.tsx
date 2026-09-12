@@ -370,6 +370,7 @@ const loadPendingUploads = async () => {
       })
       .eq('user_id', user.id)
       .in('status', ['uploading', 'processing'])
+      .not('caption', 'is', null) // excludes new-flow pre-upload rows still silently editing (caption null) — governed by the separate 3-hour abandon cron, not this 90s legacy-flow heuristic
       .lt('updated_at', staleThreshold);
 
     // Get pending uploads from pending_uploads table
@@ -377,7 +378,8 @@ const loadPendingUploads = async () => {
       .from('pending_uploads')
       .select('*')
       .eq('user_id', user.id)
-      .in('status', ['uploading', 'processing', 'failed'])
+      .in('status', ['uploading', 'processing', 'failed', 'posted', 'interrupted'])
+      .not('caption', 'is', null) // never show a new-flow row still silently editing (caption only attaches at Post time)
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -412,6 +414,7 @@ const loadPendingUploadsInBackground = async () => {
       })
       .eq('user_id', user.id)
       .in('status', ['uploading', 'processing'])
+      .not('caption', 'is', null) // excludes new-flow pre-upload rows still silently editing (caption null) — governed by the separate 3-hour abandon cron, not this 90s legacy-flow heuristic
       .lt('updated_at', staleThreshold);
 
     // Fetch without showing loading state
@@ -419,7 +422,8 @@ const loadPendingUploadsInBackground = async () => {
       .from('pending_uploads')
       .select('*')
       .eq('user_id', user.id)
-      .in('status', ['uploading', 'processing', 'failed'])
+      .in('status', ['uploading', 'processing', 'failed', 'posted', 'interrupted'])
+      .not('caption', 'is', null) // never show a new-flow row still silently editing (caption only attaches at Post time)
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -3225,6 +3229,20 @@ const tabs: TabBarItem[] = [
   ) : null}
 </View>
             </View>
+
+{/* TEMPORARY DEV-ONLY SCAFFOLDING — delete once Phase 2 (pre-upload prototype)
+    is done being tested. Only reachable route to /dev-preupload-test.
+    __DEV__-gated so this can never render in a production build, regardless
+    of what's uncommitted in the working tree at build time. */}
+{__DEV__ && (
+  <Pressable
+    onPress={() => router.push('/dev-preupload-test')}
+    style={{ alignSelf: 'center', paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#500', borderRadius: 6, marginTop: 8 }}
+  >
+    <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>DEV: Pre-upload Test</Text>
+  </Pressable>
+)}
+{/* END TEMPORARY DEV-ONLY SCAFFOLDING */}
 
 {/* Stats */}
 <View style={styles.stats}>
