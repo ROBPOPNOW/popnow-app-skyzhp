@@ -88,6 +88,12 @@ export default function UploadScreen() {
   // confirmation off once the user has committed, per the state model ('interrupted' is
   // only ever reachable from 'posted', never a reason to discard-on-exit again here).
   const [hasPosted, setHasPosted] = useState(false);
+  // Drives the Post button's disabled/"Preparing..." state and Step 2's post-time
+  // decision: 'ready' once startPreupload has a row to attach metadata to; 'failed'
+  // if pre-upload couldn't get that far (Post transparently falls back to the legacy
+  // flow in that case). Stays 'preparing' forever when USE_PREUPLOAD is off — harmless,
+  // since every check on this value is itself gated behind USE_PREUPLOAD.
+  const [preuploadState, setPreuploadState] = useState<'preparing' | 'ready' | 'failed'>('preparing');
 
   const navigation = useNavigation();
 
@@ -259,6 +265,7 @@ export default function UploadScreen() {
 
       if (createError || !createData?.videoId) {
         console.error('❌ [preupload] bunny-create-video failed:', createError || createData);
+        setPreuploadState('failed');
         return; // nothing created yet — nothing to clean up
       }
 
@@ -288,11 +295,13 @@ export default function UploadScreen() {
         // Bunny video WAS created — active cleanup, nothing else exists yet to undo.
         await cleanupBunnyVideo(bunnyVideoId!, isPremium);
         preuploadBunnyVideoIdRef.current = null;
+        setPreuploadState('failed');
         return;
       }
 
       pendingUploadId = pendingRow.id;
       preuploadPendingUploadIdRef.current = pendingUploadId;
+      setPreuploadState('ready');
       console.log('✅ [preupload] pending_uploads row inserted:', pendingUploadId);
 
       // Step 4: start the background upload via the proxy.
@@ -303,6 +312,7 @@ export default function UploadScreen() {
         await supabase.from('pending_uploads').delete().eq('id', pendingUploadId!);
         preuploadBunnyVideoIdRef.current = null;
         preuploadPendingUploadIdRef.current = null;
+        setPreuploadState('failed');
         return;
       }
 
@@ -369,6 +379,7 @@ export default function UploadScreen() {
       }
       preuploadBunnyVideoIdRef.current = null;
       preuploadPendingUploadIdRef.current = null;
+      setPreuploadState('failed');
     }
   };
 
@@ -551,9 +562,109 @@ export default function UploadScreen() {
     }
   };
 
+// Dispatches to the new pre-upload-aware Post path when USE_PREUPLOAD is on AND
+// pre-upload actually got far enough to have something to attach to; falls back
+// to the legacy flow otherwise (flag off, or pre-upload failed — see preuploadState).
+// The USE_PREUPLOAD && short-circuit means this always resolves to proceedWithUpload
+// when the flag is off, regardless of preuploadState's value.
+const handlePostConfirmed = async () => {
+  if (USE_PREUPLOAD && preuploadState !== 'failed') {
+    await handlePreuploadPost();
+  } else {
+    await proceedWithUpload();
+  }
+};
+
+// Step 2's Post path: attach the now-known caption/tags/location to the pre-upload
+// row that's been silently uploading since the edit screen mounted, flip it to
+// 'posted', and let the finalizer (webhook, or this call's own unconditional
+// finalize-posted-upload check for the case Bunny already finished before Post)
+// take it from here — no new Bunny video, no re-upload of the bytes.
+const handlePreuploadPost = async () => {
+  console.log('🚀 handlePreuploadPost called');
+
+  // 🚨 CRITICAL: Immediate state update to disable button
+  setIsUploading(true);
+
+  const validated = await validatePostPreconditions();
+  if (!validated) return;
+  const { user, description, location } = validated;
+
+  // Defensive — the "Preparing..." disabled button should make this unreachable
+  // (preuploadState only leaves 'preparing' once the ref is set), but never trust
+  // UI state alone for something this consequential. If they've somehow drifted
+  // apart, fall back to the legacy flow rather than crash or hang on a null ref.
+  if (preuploadState !== 'ready' || !preuploadPendingUploadIdRef.current) {
+    console.error('⚠️ [preupload] Post tapped but pre-upload is not ready (state:', preuploadState, ') — falling back to legacy flow');
+    return proceedWithUpload();
+  }
+
+  try {
+    console.log('🔍 Checking upload limit...');
+    const uploadLimitCheck = await checkUploadLimit(user.id);
+
+    if (!uploadLimitCheck.allowed) {
+      console.log('❌ Upload limit reached:', uploadLimitCheck.currentCount);
+      Alert.alert(
+        'Upload Limit Reached',
+        uploadLimitCheck.message,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Upgrade to Premium', onPress: () => router.push('/settings') },
+        ]
+      );
+      setIsUploading(false);
+      return;
+    }
+
+    console.log('✅ Upload limit OK, attaching metadata to pre-upload row:', preuploadPendingUploadIdRef.current);
+
+    const { error: updateError } = await supabase
+      .from('pending_uploads')
+      .update({
+        caption: description,
+        tags: hashtags,
+        location_latitude: location.latitude,
+        location_longitude: location.longitude,
+        location_name: location.name,
+        location_privacy: locationPrivacy,
+        request_id: requestId || null,
+        status: 'posted',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', preuploadPendingUploadIdRef.current);
+
+    if (updateError) {
+      console.error('❌ [preupload] Failed to attach metadata to pending_uploads row:', updateError);
+      Alert.alert('Upload Failed', 'Failed to save your post. Please try again.');
+      setIsUploading(false);
+      return;
+    }
+
+    console.log('✅ [preupload] pending_upload marked posted:', preuploadPendingUploadIdRef.current);
+    setHasPosted(true);
+
+    // Fire-and-forget — covers the case where Bunny already reported Finished
+    // before Post happened (webhook fired while this row was still 'uploading'/
+    // 'ready', so no future webhook delivery is coming for this GUID). A no-op
+    // if Bunny isn't done yet; the webhook or reconciliation cron finalizes later.
+    supabase.functions
+      .invoke('finalize-posted-upload', { body: { pendingUploadId: preuploadPendingUploadIdRef.current } })
+      .then(({ data }) => console.log('ℹ️ [preupload] finalize-posted-upload result:', data))
+      .catch((error) => console.error('⚠️ [preupload] finalize-posted-upload invoke failed (non-critical):', error));
+
+    console.log('📱 Navigating to profile pending tab...');
+    router.replace('/(tabs)/profile?tab=pending&refresh=true');
+  } catch (error: any) {
+    console.error('❌ [preupload] Post error:', error);
+    Alert.alert('Upload Failed', error.message || 'An unknown error occurred. Please try again.', [{ text: 'OK' }]);
+    setIsUploading(false);
+  }
+};
+
 const handleUpload = async () => {
   console.log('🎬 User tapped Upload Video button');
-  
+
   // 🚨 CHECK: If exact location is selected, show confirmation popup FIRST
   if (locationPrivacy === 'exact') {
     console.log('⚠️ Exact location selected - showing confirmation popup');
@@ -566,7 +677,7 @@ const handleUpload = async () => {
           onPress: () => {
             console.log('✅ User confirmed exact location - proceeding with upload');
             // User confirmed - proceed with upload
-            proceedWithUpload();
+            handlePostConfirmed();
           },
         },
         {
@@ -594,19 +705,28 @@ const handleUpload = async () => {
 
   // If not exact location, proceed directly with upload
   console.log('✅ Non-exact location selected - proceeding with upload');
-  proceedWithUpload();
+  handlePostConfirmed();
 };
 
-const proceedWithUpload = async () => {
-  console.log('🚀 proceedWithUpload called');
-  
-  // 🚨 CRITICAL: Immediate state update to disable button
-  setIsUploading(true);
-  
+// Shared by proceedWithUpload (legacy) and handlePreuploadPost (Step 2) — one
+// implementation, two callers, so the double-tap guard and required-field checks
+// can't drift apart between the two Post paths. Returns the validated, non-null
+// { user, description, location } on success (destructuring these shadows the
+// same-named component state below, so every existing reference to description/
+// location further down proceedWithUpload keeps working unchanged, now non-null),
+// or null after already showing whatever Alert applies and resetting isUploading
+// (except the "already in progress" guard, which deliberately leaves isUploading
+// true — a real upload is still running, so the button should stay disabled).
+const validatePostPreconditions = async (): Promise<{
+  user: any;
+  videoUri: string;
+  description: string;
+  location: { latitude: number; longitude: number; name: string };
+} | null> => {
   // 🚨 CRITICAL: Prevent double uploads - check all flags FIRST
   if (uploadStartedRef.current || uploadInProgressRef.current) {
     console.log('⚠️ Upload already in progress, ignoring duplicate tap');
-    return;
+    return null;
   }
 
   // Debouncing: Prevent multiple taps within 2 seconds
@@ -615,7 +735,7 @@ const proceedWithUpload = async () => {
   if (timeSinceLastAttempt < 2000) {
     console.log('⚠️ Rapid tap detected, debouncing');
     setIsUploading(false);
-    return;
+    return null;
   }
   lastUploadAttemptRef.current = now;
 
@@ -623,7 +743,7 @@ const proceedWithUpload = async () => {
   if (videoUriRef.current === videoUri && uploadStartedRef.current) {
     console.log('⚠️ This video is already being uploaded');
     setIsUploading(false);
-    return;
+    return null;
   }
 
   try {
@@ -632,20 +752,20 @@ const proceedWithUpload = async () => {
     if (!user) {
       Alert.alert('Error', 'You must be logged in to upload');
       setIsUploading(false);
-      return;
+      return null;
     }
 
     // Validation
     if (!videoUri) {
       Alert.alert('Error', 'Please record a video first');
       setIsUploading(false);
-      return;
+      return null;
     }
 
     if (!description.trim()) {
       Alert.alert('Error', 'Please add a description');
       setIsUploading(false);
-      return;
+      return null;
     }
 
     if (!location) {
@@ -670,9 +790,34 @@ const proceedWithUpload = async () => {
           }
         ]
       );
-      return;
+      return null;
     }
 
+    return { user, videoUri, description, location };
+  } catch (error: any) {
+    // Mirrors proceedWithUpload's own catch below — a validation-time exception
+    // (e.g. auth.getUser() failing) gets the same generic alert and flag reset
+    // it always has, rather than surfacing as a silent unhandled rejection.
+    console.error('❌ Upload error (validation):', error);
+    Alert.alert('Upload Failed', error.message || 'An unknown error occurred. Please try again.', [{ text: 'OK' }]);
+    uploadStartedRef.current = false;
+    uploadInProgressRef.current = false;
+    setIsUploading(false);
+    return null;
+  }
+};
+
+const proceedWithUpload = async () => {
+  console.log('🚀 proceedWithUpload called');
+
+  // 🚨 CRITICAL: Immediate state update to disable button
+  setIsUploading(true);
+
+  const validated = await validatePostPreconditions();
+  if (!validated) return;
+  const { user, videoUri, description, location } = validated;
+
+  try {
     // 🆕 CHECK UPLOAD LIMIT (5/hour for free users)
     console.log('🔍 Checking upload limit...');
     const uploadLimitCheck = await checkUploadLimit(user.id);
@@ -1479,14 +1624,22 @@ if (pendingUploadId) {
           )}
 
           <Pressable
-            style={[styles.uploadButton, isUploading && styles.uploadButtonDisabled]}
+            style={[
+              styles.uploadButton,
+              (isUploading || (USE_PREUPLOAD && preuploadState === 'preparing')) && styles.uploadButtonDisabled,
+            ]}
             onPress={handleUpload}
-            disabled={isUploading}
+            disabled={isUploading || (USE_PREUPLOAD && preuploadState === 'preparing')}
           >
             {isUploading ? (
               <>
                 <ActivityIndicator size="small" color="#FFFFFF" />
                 <Text style={styles.uploadButtonText}>Uploading...</Text>
+              </>
+            ) : USE_PREUPLOAD && preuploadState === 'preparing' ? (
+              <>
+                <ActivityIndicator size="small" color="#FFFFFF" />
+                <Text style={styles.uploadButtonText}>Preparing...</Text>
               </>
             ) : (
               <>
