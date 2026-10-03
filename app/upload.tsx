@@ -310,8 +310,34 @@ export default function UploadScreen() {
       console.log('✅ [preupload] pending_uploads row inserted:', pendingUploadId);
 
       // Step 4: start the background upload via the proxy.
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.access_token) {
+      // The background task carries this exact Authorization header for its whole life,
+      // including any OS retry after a network drop, so mint a fresh token right before
+      // handing it over. Never blocks the upload — any failure falls through to the cached token.
+      let accessToken: string | undefined;
+      try {
+        const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+        if (!refreshError && refreshed?.session?.access_token) {
+          accessToken = refreshed.session.access_token;
+        } else {
+          console.warn('⚠️ [preupload] refreshSession failed, using existing session token:', refreshError?.message);
+        }
+      } catch (refreshException) {
+        // Caught here on purpose: if this escaped to the outer catch, its active cleanup
+        // would delete the Bunny video + row over a transient token hiccup.
+        console.warn('⚠️ [preupload] refreshSession threw, using existing session token:', refreshException);
+      }
+      if (!accessToken) {
+        const { data: { session } } = await supabase.auth.getSession();
+        accessToken = session?.access_token;
+      }
+
+      // The user may have discarded during the awaits above, when no task existed yet to cancel.
+      if (isDiscardingRef.current) {
+        console.log('ℹ️ [preupload] discarded before the upload task was created — not starting it');
+        return;
+      }
+
+      if (!accessToken) {
         console.error('❌ [preupload] no active session token, aborting');
         await cleanupBunnyVideo(bunnyVideoId!, isPremium);
         await supabase.from('pending_uploads').delete().eq('id', pendingUploadId!);
@@ -329,7 +355,7 @@ export default function UploadScreen() {
           uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
           sessionType: FileSystem.FileSystemSessionType.BACKGROUND,
           headers: {
-            Authorization: `Bearer ${session.access_token}`,
+            Authorization: `Bearer ${accessToken}`,
             apikey: SUPABASE_ANON_KEY,
             'X-Bunny-Video-Guid': bunnyVideoId!,
             'X-Bunny-Is-Premium': isPremium ? 'true' : 'false',
@@ -603,13 +629,23 @@ const handlePreuploadPost = async () => {
   if (!validated) return;
   const { user, description, location } = validated;
 
+  // Legacy fallback for both branches below. Resets the 2s rapid-tap debounce first:
+  // validatePostPreconditions() above just stamped it and proceedWithUpload() runs the
+  // same validator again — without this it would bail with "Rapid tap detected" a moment
+  // later, silently re-enable the button and upload nothing. The validator re-stamps the
+  // timestamp before its first await, so normal double-tap protection is unchanged.
+  const fallbackToLegacy = () => {
+    lastUploadAttemptRef.current = 0;
+    return proceedWithUpload();
+  };
+
   // Defensive — the "Preparing..." disabled button should make this unreachable
   // (preuploadState only leaves 'preparing' once the ref is set), but never trust
   // UI state alone for something this consequential. If they've somehow drifted
   // apart, fall back to the legacy flow rather than crash or hang on a null ref.
   if (preuploadState !== 'ready' || !preuploadPendingUploadIdRef.current) {
     console.error('⚠️ [preupload] Post tapped but pre-upload is not ready (state:', preuploadState, ') — falling back to legacy flow');
-    return proceedWithUpload();
+    return fallbackToLegacy();
   }
 
   try {
@@ -638,7 +674,7 @@ const handlePreuploadPost = async () => {
 
     console.log(`✅ Upload limit OK, attaching metadata to pre-upload row (status: ${finalStatus}):`, preuploadPendingUploadIdRef.current);
 
-    const { error: updateError } = await supabase
+    const { data: updatedRows, error: updateError } = await supabase
       .from('pending_uploads')
       .update({
         caption: description,
@@ -651,13 +687,48 @@ const handlePreuploadPost = async () => {
         status: finalStatus,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', preuploadPendingUploadIdRef.current);
+      .eq('id', preuploadPendingUploadIdRef.current)
+      .select('id'); // returns the rows actually updated, so zero matches is detectable
 
     if (updateError) {
       console.error('❌ [preupload] Failed to attach metadata to pending_uploads row:', updateError);
       Alert.alert('Upload Failed', 'Failed to save your post. Please try again.');
       setIsUploading(false);
       return;
+    }
+
+    if (!updatedRows || updatedRows.length === 0) {
+      // Zero rows matched. RLS on pending_uploads is owner-only for both UPDATE and SELECT,
+      // so for an owned row an empty result means the row isn't there (e.g. the 3h reconciler
+      // abandoned it during a very long edit). Confirm with a separate read before acting — a
+      // false "gone" would post this video TWICE (legacy upload + the surviving row finalizing).
+      const { data: stillThere, error: probeError } = await supabase
+        .from('pending_uploads')
+        .select('id, status')
+        .eq('id', preuploadPendingUploadIdRef.current)
+        .maybeSingle();
+
+      if (probeError || stillThere) {
+        console.error('❌ [preupload] update matched no rows but the row exists / probe failed:', probeError ?? stillThere);
+        Alert.alert('Upload Failed', 'Failed to save your post. Please try again.');
+        setIsUploading(false);
+        return; // can't be sure it's gone — letting the user retry beats risking a duplicate
+      }
+
+      console.warn('⚠️ [preupload] pre-upload row is gone — posting via the legacy flow instead');
+      // Tear down what's left of the dead pre-upload (same helpers handleDiscardAndLeave uses).
+      try {
+        await preuploadTaskRef.current?.cancelAsync();
+      } catch (cancelError) {
+        console.error('⚠️ [preupload] cancelAsync failed during zero-rows fallback (continuing):', cancelError);
+      }
+      if (preuploadBunnyVideoIdRef.current) {
+        await cleanupBunnyVideo(preuploadBunnyVideoIdRef.current, preuploadIsPremiumRef.current);
+      }
+      preuploadTaskRef.current = null;
+      preuploadBunnyVideoIdRef.current = null;
+      preuploadPendingUploadIdRef.current = null;
+      return fallbackToLegacy();
     }
 
     console.log(`✅ [preupload] pending_upload marked ${finalStatus}:`, preuploadPendingUploadIdRef.current);

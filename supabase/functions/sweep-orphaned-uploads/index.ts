@@ -1,5 +1,6 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { isServiceRoleRequest, unauthorizedResponse } from '../_shared/requireServiceRole.ts';
 
 // Same credential pattern as bunny-delete-video / delete-expired-videos:
 // this function calls Bunny.net directly with server-held secrets, no client involved.
@@ -47,7 +48,12 @@ async function deleteFromBunny(videoId: string, isPremium: boolean): Promise<boo
   }
 }
 
-Deno.serve(async (_req) => {
+Deno.serve(async (req) => {
+  if (!isServiceRoleRequest(req)) {
+    console.error('❌ sweep-orphaned-uploads: caller is not the service role — rejecting');
+    return unauthorizedResponse();
+  }
+
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('🧹 SWEEP ORPHANED UPLOADS - STARTED');
   console.log('⏰ Timestamp:', new Date().toISOString());
@@ -69,6 +75,10 @@ Deno.serve(async (_req) => {
     const { data: staleUploads, error: fetchError } = await supabase
       .from('pending_uploads')
       .select('id, user_id, bunny_video_id, updated_at, status')
+      // Legacy-flow rows only. Pre-upload rows (caption still null while the user edits)
+      // have their own 3-hour lifecycle in reconcile-pending-uploads; without this guard
+      // the 10-minute staleness rule below would delete them mid-edit.
+      .not('caption', 'is', null)
       .lt('updated_at', cutoff)
       .or('status.in.(uploading,processing),and(status.eq.failed,bunny_video_id.not.is.null)');
 
