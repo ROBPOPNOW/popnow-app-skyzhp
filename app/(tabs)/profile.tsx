@@ -2850,7 +2850,7 @@ console.log('📋 Request Card:', {
           <ScrollView contentContainerStyle={styles.pendingContainer}>
 {pendingUploads.map((upload) => {
   const uploadCaptionText = upload.caption || 'Untitled';
-  
+
   // Determine status text based on upload status
 let uploadStatusText = 'Processing...';
 if (upload.status === 'uploading') {
@@ -2859,10 +2859,26 @@ if (upload.status === 'uploading') {
   uploadStatusText = 'Processing video...';
 } else if (upload.status === 'failed') {
   uploadStatusText = 'Upload Failed';
+} else if (upload.status === 'posted') {
+  // Pre-upload row, metadata attached — bytes are usually already on Bunny by the
+  // time this card appears, so this is really "finalizing," not "uploading."
+  uploadStatusText = 'Finalizing...';
+} else if (upload.status === 'interrupted') {
+  // Reachable only from 'posted' (Option C) — the post itself succeeded, the
+  // upload didn't, distinct wording from the legacy 'failed' case.
+  uploadStatusText = 'Post Failed';
 }
 
-const isFailed = upload.status === 'failed';
-  
+// 'interrupted' gets the same retry/delete treatment as the legacy 'failed' —
+// handleRetryUpload/handleDismissFailedUpload are reused unchanged (Step 4, Part A):
+// the row shape (caption/tags/location/video_uri/bunny_video_id) is identical
+// regardless of whether it came from the legacy flow or pre-upload.
+const isFailed = upload.status === 'failed' || upload.status === 'interrupted';
+// Real, meaningful progress only ever exists for the two legacy-only-reachable
+// statuses — a pre-upload row's upload_progress is frozen at 0 (Step 4, Part B).
+const showProgress = upload.status === 'uploading' || upload.status === 'processing';
+const isFinalizing = upload.status === 'posted';
+
   const uploadDateText = formatDate(upload.created_at);
   const uploadProgress = upload.upload_progress || 0;
   return (
@@ -2875,11 +2891,15 @@ const isFailed = upload.status === 'failed';
     >
       <View style={styles.pendingHeader}>
         <Text style={styles.pendingCaption}>{uploadCaptionText}</Text>
-        {/* Progress bar */}
-<View style={styles.progressBarContainer}>
-  <View style={[styles.progressBar, { width: `${uploadProgress}%` }]} />
-</View>
-<Text style={styles.progressText}>{uploadProgress}%</Text>
+        {/* Progress bar — only for legacy 'uploading'/'processing', where the % is real */}
+        {showProgress && (
+          <>
+            <View style={styles.progressBarContainer}>
+              <View style={[styles.progressBar, { width: `${uploadProgress}%` }]} />
+            </View>
+            <Text style={styles.progressText}>{uploadProgress}%</Text>
+          </>
+        )}
 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
   <View
     style={[
@@ -2919,6 +2939,15 @@ const isFailed = upload.status === 'failed';
       </View>
 
       <Text style={styles.pendingDate}>{uploadDateText}</Text>
+
+      {/* 'posted' pre-upload rows: no percentage to show, just a spinner while we
+          wait on the webhook / finalize-posted-upload / reconciliation cron. */}
+      {isFinalizing && (
+        <View style={styles.processingContainer}>
+          <ActivityIndicator size="small" color={colors.primary} />
+          <Text style={styles.processingText}>Finalizing your post...</Text>
+        </View>
+      )}
 
       {/* Show animated processing indicator */}
       {upload.moderation_status === 'pending' && (

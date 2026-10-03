@@ -83,6 +83,11 @@ export default function UploadScreen() {
   const preuploadBunnyVideoIdRef = useRef<string | null>(null);
   const preuploadPendingUploadIdRef = useRef<string | null>(null);
   const preuploadIsPremiumRef = useRef(false); // so the discard handler doesn't need to re-query is_premium
+  // Step 4 (Part A, Layer 1): set true only on a GENUINE background-upload failure
+  // (startPreupload's own passive-failure branch and its outer-catch mirror) — never
+  // on a user-initiated discard. handlePreuploadPost checks this at Post time to write
+  // 'interrupted' instead of 'posted' when there's already nothing left to wait on.
+  const preuploadUploadFailedRef = useRef(false);
   const isDiscardingRef = useRef(false); // re-entrancy guard — a second exit attempt while cleanup is mid-flight is a no-op
   // Step 2 (Post handler) will flip this true on a successful Post — gates the discard
   // confirmation off once the user has committed, per the state model ('interrupted' is
@@ -355,6 +360,9 @@ export default function UploadScreen() {
         // per the state model: the row stays 'uploading' and is resolved either by the
         // user's own back-arrow discard or the 3-hour reconciliation cron, never by an
         // active delete triggered from a possibly-spurious upload rejection.
+        // Still record that it failed, though — if the user Posts anyway, Post should
+        // write 'interrupted' (Option C) instead of 'posted' (nothing left to wait on).
+        preuploadUploadFailedRef.current = true;
       } else {
         console.log('✅ [preupload] upload complete for', bunnyVideoId);
       }
@@ -380,6 +388,11 @@ export default function UploadScreen() {
       preuploadBunnyVideoIdRef.current = null;
       preuploadPendingUploadIdRef.current = null;
       setPreuploadState('failed');
+      // Note: by this point preuploadPendingUploadIdRef is already null and preuploadState
+      // is already 'failed' — handlePreuploadPost's own defensive ready-check already
+      // falls back to the legacy flow before this ref would ever be read for this row.
+      // Set anyway for consistency with the passive-failure branch above.
+      preuploadUploadFailedRef.current = true;
     }
   };
 
@@ -617,7 +630,13 @@ const handlePreuploadPost = async () => {
       return;
     }
 
-    console.log('✅ Upload limit OK, attaching metadata to pre-upload row:', preuploadPendingUploadIdRef.current);
+    // Step 4 (Part A, Layer 1): if the background upload already demonstrably failed
+    // (observed by startPreupload before Post was even tapped), there's no pending
+    // upload left for any webhook or finalize-posted-upload call to ever resolve —
+    // write 'interrupted' directly instead of 'posted', skipping the dead-end state.
+    const finalStatus: 'posted' | 'interrupted' = preuploadUploadFailedRef.current ? 'interrupted' : 'posted';
+
+    console.log(`✅ Upload limit OK, attaching metadata to pre-upload row (status: ${finalStatus}):`, preuploadPendingUploadIdRef.current);
 
     const { error: updateError } = await supabase
       .from('pending_uploads')
@@ -629,7 +648,7 @@ const handlePreuploadPost = async () => {
         location_name: location.name,
         location_privacy: locationPrivacy,
         request_id: requestId || null,
-        status: 'posted',
+        status: finalStatus,
         updated_at: new Date().toISOString(),
       })
       .eq('id', preuploadPendingUploadIdRef.current);
@@ -641,17 +660,19 @@ const handlePreuploadPost = async () => {
       return;
     }
 
-    console.log('✅ [preupload] pending_upload marked posted:', preuploadPendingUploadIdRef.current);
+    console.log(`✅ [preupload] pending_upload marked ${finalStatus}:`, preuploadPendingUploadIdRef.current);
     setHasPosted(true);
 
-    // Fire-and-forget — covers the case where Bunny already reported Finished
-    // before Post happened (webhook fired while this row was still 'uploading'/
-    // 'ready', so no future webhook delivery is coming for this GUID). A no-op
-    // if Bunny isn't done yet; the webhook or reconciliation cron finalizes later.
-    supabase.functions
-      .invoke('finalize-posted-upload', { body: { pendingUploadId: preuploadPendingUploadIdRef.current } })
-      .then(({ data }) => console.log('ℹ️ [preupload] finalize-posted-upload result:', data))
-      .catch((error) => console.error('⚠️ [preupload] finalize-posted-upload invoke failed (non-critical):', error));
+    if (finalStatus === 'posted') {
+      // Fire-and-forget — covers the case where Bunny already reported Finished
+      // before Post happened (webhook fired while this row was still 'uploading'/
+      // 'ready', so no future webhook delivery is coming for this GUID). A no-op
+      // if Bunny isn't done yet; the webhook or reconciliation cron finalizes later.
+      supabase.functions
+        .invoke('finalize-posted-upload', { body: { pendingUploadId: preuploadPendingUploadIdRef.current } })
+        .then(({ data }) => console.log('ℹ️ [preupload] finalize-posted-upload result:', data))
+        .catch((error) => console.error('⚠️ [preupload] finalize-posted-upload invoke failed (non-critical):', error));
+    }
 
     console.log('📱 Navigating to profile pending tab...');
     router.replace('/(tabs)/profile?tab=pending&refresh=true');
@@ -917,6 +938,11 @@ const proceedWithUpload = async () => {
     }
 
     console.log('✅ Pending upload created:', pendingUpload.id);
+    // Disarms usePreventRemove now that this upload is genuinely committed, so the
+    // navigate below isn't intercepted — same timing principle as handlePreuploadPost's
+    // own setHasPosted, placed right after its write succeeds, not before validation.
+    // Harmless no-op when USE_PREUPLOAD is off (nothing reads hasPosted in that case).
+    setHasPosted(true);
 
     // NOW navigate to Pending tab (after record exists)
     console.log('📱 Navigating to profile pending tab...');
