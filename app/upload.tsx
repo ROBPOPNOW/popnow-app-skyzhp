@@ -716,14 +716,16 @@ const handlePreuploadPost = async () => {
       }
 
       console.warn('⚠️ [preupload] pre-upload row is gone — posting via the legacy flow instead');
-      // Tear down what's left of the dead pre-upload (same helpers handleDiscardAndLeave uses).
+      // Tear down what's left of the dead pre-upload on the client side.
+      // Deliberately NO Bunny cleanup here: bunny-delete-video only deletes a video the caller
+      // can prove they own via a pending_uploads/videos row, and the row that would prove it is
+      // exactly what we just confirmed is gone — so that call would always 404. It isn't needed
+      // in the real flow anyway: the reconciler that abandons a row deletes the Bunny object
+      // along with it (and logs any it fails to delete as ORPHANED).
       try {
         await preuploadTaskRef.current?.cancelAsync();
       } catch (cancelError) {
         console.error('⚠️ [preupload] cancelAsync failed during zero-rows fallback (continuing):', cancelError);
-      }
-      if (preuploadBunnyVideoIdRef.current) {
-        await cleanupBunnyVideo(preuploadBunnyVideoIdRef.current, preuploadIsPremiumRef.current);
       }
       preuploadTaskRef.current = null;
       preuploadBunnyVideoIdRef.current = null;
