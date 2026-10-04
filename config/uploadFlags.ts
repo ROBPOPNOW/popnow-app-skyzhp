@@ -8,7 +8,9 @@ export const USE_EDGE_STATUS_CHECK = true; // flip to false to revert to the dir
 export const USE_EDGE_DELETE = true; // flip to false to revert to the direct-key delete path
 export const USE_EDGE_DOWNLOAD = true; // flip to false to revert to the direct-key download-url path
 
-// Gates the Tier 1 pre-upload/background-upload rebuild (upload starts while the user is still
-// editing, survives app close). Everything above this line is the current TUS flow and stays
-// live and default while USE_PREUPLOAD is false — flip only once the new path is built and tested.
-export const USE_PREUPLOAD = false;
+// Gates the Tier 1 pre-upload/background-upload flow: the video uploads silently in the
+// background while the user is still on the edit screen, and Post attaches metadata and
+// finalizes server-side. ON as of 1.0.17. Set to false to fall back to the legacy post-time
+// upload — that flow (the TUS code above) stays in the app as the fallback, and is what
+// app versions older than 1.0.17 still run.
+export const USE_PREUPLOAD = true;
