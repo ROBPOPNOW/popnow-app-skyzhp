@@ -13,6 +13,10 @@ import { UPLOAD_WINDOW_MS } from '../_shared/uploadWindow.ts';
 //   posted  + Bunny 0/1, Post time > 45 min ago   -> 'interrupted' (bytes never made it)
 //   posted  + Bunny 2/3/7/8                 -> leave alone at any age (always finalizes, even if slow)
 //   posted  + Bunny lookup error            -> skip, change nothing
+//   ready + caption NOT null, updated > 5 min ago -> STRANDED POST: treated exactly like 'posted'
+//        (a Post whose status the webhook's old unconditional set-ready overwrote; the caption is only
+//        ever attached by Post, and the 5-min grace keeps this off any in-flight legacy upload, whose
+//        row is touched every couple of seconds)
 //   uploading/ready + caption null, created > 3h ago -> ABANDON (delete row + Bunny object)
 //   failed  + caption null, updated > 1h ago         -> delete (junk left by the old sweep)
 //   interrupted                             -> never touched (the user retries/deletes via the UI)
@@ -33,6 +37,7 @@ const ABANDON_UNPOSTED_AFTER_MS = UPLOAD_WINDOW_MS; // 3h, from _shared/uploadWi
 const DELETE_FAILED_CAPTIONLESS_AFTER_MS = 60 * 60 * 1000; // 1h
 const POSTED_BYTES_STUCK_AFTER_MS = 45 * 60 * 1000; // measured from Post time (updated_at)
 const POSTED_STILL_ENCODING_WARN_AFTER_MS = 24 * 60 * 60 * 1000; // warn-only, never acts
+const STRANDED_READY_GRACE_MS = 5 * 60 * 1000; // ready+caption rows younger than this may still be a live legacy upload
 const MAX_ROWS_PER_PHASE = 50;
 const RUN_DEADLINE_MS = 100_000; // stop starting new rows past this; edge wall-clock limit is 150s
 const BUNNY_FETCH_TIMEOUT_MS = 10_000;
@@ -167,25 +172,45 @@ async function reconcilePosted(ctx: Ctx) {
   const { supabase, dryRun } = ctx;
   const would = (a: string) => (dryRun ? `would-${a}` : a);
 
-  const { data: rows, error } = await supabase
+  const { data: postedRows, error } = await supabase
     .from('pending_uploads')
     .select('*')
     .eq('status', 'posted')
     .order('updated_at', { ascending: true })
     .limit(MAX_ROWS_PER_PHASE);
   if (error) throw error;
-  if (!rows?.length) return;
+
+  // Stranded posts: 'ready' WITH a caption. The caption is only ever attached by Post (in the
+  // same UPDATE that sets 'posted'), so this shape can only be a Post whose status got
+  // overwritten back to 'ready' by the webhook's old unconditional set-ready. Separate query
+  // (not an .or() string) so there's no doubt about how the timestamp parses.
+  const strandedCutoff = new Date(Date.now() - STRANDED_READY_GRACE_MS).toISOString();
+  const { data: strandedRows, error: strandedError } = await supabase
+    .from('pending_uploads')
+    .select('*')
+    .eq('status', 'ready')
+    .not('caption', 'is', null)
+    .lt('updated_at', strandedCutoff)
+    .order('updated_at', { ascending: true })
+    .limit(MAX_ROWS_PER_PHASE);
+  if (strandedError) throw strandedError;
+
+  const rows = [...(postedRows ?? []), ...(strandedRows ?? [])].slice(0, MAX_ROWS_PER_PHASE);
+  if (!rows.length) return;
 
   const premiumMap = await loadPremiumMap(supabase, rows.map((r: any) => r.user_id));
 
   for (const row of rows) {
     if (ctx.timeUp()) { ctx.deadlineHit = true; break; }
-    const record = makeRecorder(ctx, 'posted', row, row.updated_at);
+    const tag = row.status === 'ready' ? '[stranded ready+caption] ' : '';
+    const baseRecord = makeRecorder(ctx, 'posted', row, row.updated_at);
+    const record = (action: string, reason: string) => baseRecord(action, tag + reason);
     const ageMs = Date.now() - Date.parse(row.updated_at);
 
     const interrupt = async (reason: string) => {
       if (dryRun) { record(would('interrupt'), reason); return; }
-      // Conditional on still being 'posted' so a concurrent finalize/Post can't be clobbered.
+      // Conditional on the status we OBSERVED ('posted', or 'ready' for a stranded post) so a
+      // concurrent finalize/Post/webhook can't be clobbered.
       const { data: updated, error: updateError } = await supabase
         .from('pending_uploads')
         .update({
@@ -194,7 +219,8 @@ async function reconcilePosted(ctx: Ctx) {
           updated_at: new Date().toISOString(),
         })
         .eq('id', row.id)
-        .eq('status', 'posted')
+        .eq('status', row.status)
+        .not('caption', 'is', null)
         .select('id');
       if (updateError) throw updateError;
       record(updated?.length ? 'interrupted' : 'skipped-raced', reason);

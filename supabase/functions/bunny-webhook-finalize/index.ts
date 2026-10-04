@@ -117,9 +117,44 @@ Deno.serve(async (req) => {
   const thumbnailUrl = cdnHostname ? `https://${cdnHostname}/${VideoGuid}/thumbnail.jpg` : null;
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // SECTION 4: Row lookup + state handling
+  // SECTION 4: Compare-and-set to 'ready', and only if that misses, re-read and route
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+  // The write IS the check. This used to read the row, branch on its status, then write
+  // 'ready' unconditionally — so a Post that committed 'posted' between that read and that
+  // write got silently overwritten back to 'ready' (lost update; the row was then stranded:
+  // invisible to the pending tab and to every cron). Doing the check inside one atomic
+  // statement leaves no gap for that to happen.
+  //
+  // Only un-posted pre-upload rows qualify: status uploading/ready AND caption still null
+  // (Post attaches the caption and flips the status in a single UPDATE, so the caption is
+  // the commit marker). Legacy-flow rows always carry a caption, so this also means the
+  // webhook no longer touches them at all.
+  const { data: marked, error: markError } = await supabase
+    .from('pending_uploads')
+    .update({ status: 'ready', updated_at: new Date().toISOString() })
+    .eq('bunny_video_id', VideoGuid)
+    .in('status', ['uploading', 'ready'])
+    .is('caption', null)
+    .select('id');
+
+  if (markError) {
+    console.error('❌ Failed to mark pending_uploads ready for', VideoGuid, markError);
+    return new Response(JSON.stringify({ error: 'Database error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  if (marked && marked.length > 0) {
+    // Bytes + encoding done, user hasn't tapped "Post" yet (still editing). Idempotent:
+    // re-marking an already-'ready' row is a no-op.
+    console.log(`✅ Marked pending_upload ${marked[0].id} as ready (awaiting Post)`);
+    return ok();
+  }
+
+  // The compare-and-set matched nothing: this is not an un-posted pre-upload row (any more).
+  // Re-read it to see what it is NOW — e.g. a Post committed just before our write.
   const { data: row, error: lookupError } = await supabase
     .from('pending_uploads')
     .select('*')
@@ -136,39 +171,23 @@ Deno.serve(async (req) => {
 
   if (!row) {
     // Idempotency path #1: normal for a duplicate delivery after a prior finalize
-    // already deleted this row, or for a video this system never tracked.
+    // already deleted this row, a discard/abandon that removed it, or a video this
+    // system never tracked.
     console.log(`ℹ️ No pending_uploads row for ${VideoGuid} — already finalized or untracked`);
     return ok();
   }
 
-  if (row.status === 'uploading' || row.status === 'ready') {
-    // Bytes + encoding done, but the user hasn't tapped "Post" yet (still editing) —
-    // just record that Bunny is done. Idempotent: re-setting 'ready' on an
-    // already-'ready' row is a no-op.
-    const { error: updateError } = await supabase
-      .from('pending_uploads')
-      .update({ status: 'ready', bunny_video_id: VideoGuid, updated_at: new Date().toISOString() })
-      .eq('id', row.id);
-
-    if (updateError) {
-      console.error('❌ Failed to mark pending_uploads ready:', updateError);
-      return new Response(JSON.stringify({ error: 'Database error' }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    console.log(`✅ Marked pending_upload ${row.id} as ready (awaiting Post)`);
-    return ok();
-  }
-
   if (row.status !== 'posted') {
-    // Covers 'processing' (fix C — current live TUS flow: JS is already actively
-    // polling this row itself, the webhook has nothing to do) and 'completed'/'failed'
-    // (already terminal). Safe no-op, not an error.
+    // Covers 'processing' (current live TUS flow: JS is already actively polling this row
+    // itself, the webhook has nothing to do), a legacy 'uploading' row (it has a caption),
+    // 'interrupted', and the terminal 'completed'/'failed'. Safe no-op, not an error.
     console.log(`ℹ️ pending_upload ${row.id} has status '${row.status}' — not ours to finalize, ignoring`);
     return ok();
   }
+
+  // Status is strictly 'posted' on the FRESH re-read above. Section 5 below finalizes with
+  // THIS row, never an earlier read: an earlier read would still show caption = null, and
+  // videos.caption is NOT NULL.
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // SECTION 5: Finalize (status === 'posted') — logic lives in the shared

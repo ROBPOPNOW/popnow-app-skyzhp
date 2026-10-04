@@ -98,10 +98,15 @@ Deno.serve(async (req) => {
       return json({ error: 'Forbidden' }, 403);
     }
 
-    if (row.status !== 'posted') {
-      // Not committed yet (still 'uploading'/'ready') — nothing to finalize. This
-      // endpoint is only ever a no-op outside the 'posted' state.
-      console.log(`ℹ️ pending_upload ${row.id} has status '${row.status}', not 'posted' — no-op`);
+    // Committed = 'posted', OR 'ready' with a caption. Post attaches the caption in the same
+    // UPDATE that sets 'posted', so a 'ready' row that has a caption can only be a Post whose
+    // status the webhook's old unconditional set-ready overwrote (lost update). Accepting it
+    // here is safe because only the pre-upload client flow calls this function — legacy-flow
+    // rows (uploading + caption) never reach it, and 'uploading' + caption is NOT accepted.
+    const isCommitted = row.status === 'posted' || (row.status === 'ready' && row.caption != null);
+    if (!isCommitted) {
+      // Not committed yet (still editing: 'uploading'/'ready' with no caption) — nothing to finalize.
+      console.log(`ℹ️ pending_upload ${row.id} has status '${row.status}' and is not committed — no-op`);
       return json({ finalized: false, reason: 'not_posted' });
     }
 
