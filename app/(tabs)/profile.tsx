@@ -3259,20 +3259,6 @@ const tabs: TabBarItem[] = [
 </View>
             </View>
 
-{/* TEMPORARY DEV-ONLY SCAFFOLDING — delete once Phase 2 (pre-upload prototype)
-    is done being tested. Only reachable route to /dev-preupload-test.
-    __DEV__-gated so this can never render in a production build, regardless
-    of what's uncommitted in the working tree at build time. */}
-{__DEV__ && (
-  <Pressable
-    onPress={() => router.push('/dev-preupload-test')}
-    style={{ alignSelf: 'center', paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#500', borderRadius: 6, marginTop: 8 }}
-  >
-    <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>DEV: Pre-upload Test</Text>
-  </Pressable>
-)}
-{/* END TEMPORARY DEV-ONLY SCAFFOLDING */}
-
 {/* Stats */}
 <View style={styles.stats}>
   {/* Videos - Lifetime Count */}
